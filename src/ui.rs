@@ -495,7 +495,7 @@ fn draw_help_popup(f: &mut Frame, app: &App) {
         inner.height,
     );
 
-    let max_scroll = (lines.len() as usize).saturating_sub(padded.height as usize);
+    let max_scroll = lines.len().saturating_sub(padded.height as usize);
     let scroll = app.help_scroll.min(max_scroll) as u16;
 
     let paragraph = Paragraph::new(lines).scroll((scroll, 0));

@@ -100,7 +100,7 @@ async fn run_app(
                                 if tx
                                     .send(ServerEvent::Message {
                                         server_id: server_id.clone(),
-                                        message,
+                                        message: Box::new(message),
                                     })
                                     .is_err()
                                 {

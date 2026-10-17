@@ -451,7 +451,7 @@ pub enum ServerEvent {
     },
     Message {
         server_id: String,
-        message: Message,
+        message: Box<Message>,
     },
     Error {
         server_id: String,
@@ -1305,7 +1305,7 @@ impl App {
                 }
             }
             ServerEvent::Message { server_id, message } => {
-                self.handle_irc_message(&server_id, message);
+                self.handle_irc_message(&server_id, *message);
             }
         }
     }
