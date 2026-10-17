@@ -10,7 +10,7 @@ use irc::proto::{Command, Message, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/nick", "/me", "/topic", "/close", "/quit",
+    "/help", "/join", "/part", "/msg", "/nick", "/me", "/topic", "/whois", "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +176,7 @@ pub enum UserCommand {
     Nick(String),
     Me(String),
     Topic(Option<String>),
+    Whois(String),
     Close,
     Quit(Option<String>),
     Say(String),
@@ -253,6 +254,14 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 Some(rest.to_string())
             };
             Some(UserCommand::Topic(new_topic))
+        }
+        "/whois" => {
+            let target = rest.split_whitespace().next()?;
+            if target.is_empty() {
+                None
+            } else {
+                Some(UserCommand::Whois(target.to_string()))
+            }
         }
         "/close" => Some(UserCommand::Close),
         "/quit" | "/exit" => {
@@ -891,6 +900,19 @@ impl App {
                     let _ = sender.send(Command::TOPIC(chan, new_topic));
                 }
             }
+            UserCommand::Whois(target) => {
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::WHOIS(None, target.clone()));
+                }
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(
+                        None,
+                        format!("* Querying WHOIS for {target}..."),
+                        LineKind::System,
+                    ),
+                );
+            }
             UserCommand::Close => {
                 if self.active_buf().kind == BufferKind::Server {
                     self.push_to_buffer(
@@ -1201,6 +1223,92 @@ impl App {
                     }
                 }
             }
+            Response::RPL_WHOISUSER => {
+                if args.len() >= 6 {
+                    let nick = &args[1];
+                    let user = &args[2];
+                    let host = &args[3];
+                    let real = args[5..].join(" ");
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} ({user}@{host}): {real}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            Response::RPL_WHOISSERVER => {
+                if args.len() >= 4 {
+                    let nick = &args[1];
+                    let srv = &args[2];
+                    let info = args[3..].join(" ");
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} server: {srv} ({info})"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            Response::RPL_WHOISOPERATOR => {
+                if args.len() >= 3 {
+                    let nick = &args[1];
+                    let info = args[2..].join(" ");
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} {info}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            Response::RPL_WHOISIDLE => {
+                if args.len() >= 3 {
+                    let nick = &args[1];
+                    let secs = &args[2];
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} idle: {secs}s"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            Response::RPL_WHOISCHANNELS => {
+                if args.len() >= 3 {
+                    let nick = &args[1];
+                    let chans = args[2..].join(" ");
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} channels: {chans}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            Response::RPL_ENDOFWHOIS => {
+                if args.len() >= 2 {
+                    let nick = &args[1];
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} End of WHOIS"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
             Response::RPL_WELCOME
             | Response::RPL_YOURHOST
             | Response::RPL_CREATED
@@ -1284,6 +1392,10 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(
+            parse_user_command("/whois alice"),
+            Some(UserCommand::Whois("alice".to_string()))
+        );
         assert_eq!(parse_user_command("/topic"), Some(UserCommand::Topic(None)));
         assert_eq!(
             parse_user_command("/topic Rust 2024 edition"),
