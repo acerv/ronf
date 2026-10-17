@@ -10,9 +10,33 @@ use irc::proto::{ChannelMode, Command, Message, Mode, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/kick",
-    "/invite", "/mode", "/ban", "/op", "/deop", "/voice", "/devoice", "/away", "/motd", "/list",
-    "/buffer", "/raw", "/quote", "/clear", "/close", "/quit",
+    "/help",
+    "/join",
+    "/part",
+    "/msg",
+    "/query",
+    "/nick",
+    "/me",
+    "/topic",
+    "/whois",
+    "/kick",
+    "/invite",
+    "/mode",
+    "/ban",
+    "/op",
+    "/deop",
+    "/voice",
+    "/devoice",
+    "/away",
+    "/motd",
+    "/list",
+    "/buffer",
+    "/reconnect",
+    "/raw",
+    "/quote",
+    "/clear",
+    "/close",
+    "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +281,7 @@ pub enum UserCommand {
     Motd,
     List(Option<String>),
     Buffer(String),
+    Reconnect,
     Raw(String),
     Clear,
     Close,
@@ -484,6 +509,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 Some(UserCommand::Buffer(rest.to_string()))
             }
         }
+        "/reconnect" => Some(UserCommand::Reconnect),
         "/raw" | "/quote" => {
             if rest.is_empty() {
                 None
@@ -1276,6 +1302,19 @@ impl App {
                     );
                 }
             }
+            UserCommand::Reconnect => {
+                if let Some(sender) = self.senders.remove(&server_id) {
+                    let _ = sender.send(Command::QUIT(Some("Reconnecting...".to_string())));
+                }
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(
+                        None,
+                        format!("* Reconnecting to [{server_id}]..."),
+                        LineKind::System,
+                    ),
+                );
+            }
             UserCommand::Raw(raw_cmd) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
@@ -1359,6 +1398,13 @@ impl App {
     pub fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::Connected { server_id, sender } => {
+                for buf in &self.buffers {
+                    if buf.server_id.eq_ignore_ascii_case(&server_id)
+                        && buf.kind == BufferKind::Channel
+                    {
+                        let _ = sender.send_join(&buf.name);
+                    }
+                }
                 self.senders.insert(server_id.clone(), sender);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_to_buffer(
@@ -1934,6 +1980,10 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(
+            parse_user_command("/reconnect"),
+            Some(UserCommand::Reconnect)
+        );
         assert_eq!(
             parse_user_command("/away lunch"),
             Some(UserCommand::Away(Some("lunch".to_string())))

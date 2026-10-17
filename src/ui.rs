@@ -452,6 +452,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("/list [filter]", "List channels on server"),
                 ("/motd", "Request server Message of the Day"),
                 ("/buffer <target>", "Switch buffer by name or number"),
+                ("/reconnect", "Reconnect active server"),
                 ("/raw <irc_line>", "Send raw IRC protocol line"),
                 ("/clear", "Clear active buffer history"),
                 ("/close", "Close active channel or DM"),

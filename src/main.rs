@@ -67,62 +67,77 @@ async fn run_app(
         let tx = tx.clone();
 
         tokio::spawn(async move {
-            match Client::from_config(irc_cfg).await {
-                Ok(mut client) => {
-                    if let Err(err) = client.identify() {
-                        let _ = tx.send(ServerEvent::Error {
-                            server_id,
-                            error: format!("Failed to identify: {err}"),
-                        });
-                        return;
-                    }
-
-                    let sender = client.sender();
-                    let _ = tx.send(ServerEvent::Connected {
-                        server_id: server_id.clone(),
-                        sender,
-                    });
-
-                    let mut stream = match client.stream() {
-                        Ok(s) => s,
-                        Err(err) => {
+            loop {
+                match Client::from_config(irc_cfg.clone()).await {
+                    Ok(mut client) => {
+                        if let Err(err) = client.identify() {
                             let _ = tx.send(ServerEvent::Error {
-                                server_id,
-                                error: format!("Failed to open IRC stream: {err}"),
+                                server_id: server_id.clone(),
+                                error: format!("Failed to identify: {err} (retrying in 5s)"),
                             });
-                            return;
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
                         }
-                    };
 
-                    while let Some(item) = stream.next().await {
-                        match item {
-                            Ok(message) => {
-                                if tx
-                                    .send(ServerEvent::Message {
-                                        server_id: server_id.clone(),
-                                        message: Box::new(message),
-                                    })
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
+                        let sender = client.sender();
+                        if tx
+                            .send(ServerEvent::Connected {
+                                server_id: server_id.clone(),
+                                sender,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+
+                        let mut stream = match client.stream() {
+                            Ok(s) => s,
                             Err(err) => {
                                 let _ = tx.send(ServerEvent::Error {
                                     server_id: server_id.clone(),
-                                    error: format!("Stream error: {err}"),
+                                    error: format!("Failed to open IRC stream: {err} (retrying in 5s)"),
                                 });
-                                break;
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                continue;
+                            }
+                        };
+
+                        while let Some(item) = stream.next().await {
+                            match item {
+                                Ok(message) => {
+                                    if tx
+                                        .send(ServerEvent::Message {
+                                            server_id: server_id.clone(),
+                                            message: Box::new(message),
+                                        })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = tx.send(ServerEvent::Error {
+                                        server_id: server_id.clone(),
+                                        error: format!("Disconnected: {err} (reconnecting in 5s)"),
+                                    });
+                                    break;
+                                }
                             }
                         }
                     }
+                    Err(err) => {
+                        if tx
+                            .send(ServerEvent::Error {
+                                server_id: server_id.clone(),
+                                error: format!("Connection failed: {err} (retrying in 5s)"),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
-                Err(err) => {
-                    let _ = tx.send(ServerEvent::Error {
-                        server_id,
-                        error: format!("Connection failed: {err}"),
-                    });
-                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         });
     }
