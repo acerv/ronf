@@ -325,6 +325,18 @@ fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+pub fn format_user_list_entry(entry: &str) -> (String, Color) {
+    let (prefix, raw_nick) = strip_user_prefix(entry);
+    match prefix {
+        Some('~') => (format!(" {raw_nick}"), Color::Red),
+        Some('&') => (format!(" {raw_nick}"), Color::Rgb(255, 165, 0)),
+        Some('@') => (format!(" {raw_nick}"), Color::Yellow),
+        Some('%') => (format!(" {raw_nick}"), Color::Green),
+        Some('+') => (format!(" {raw_nick} (+)"), Color::White),
+        _ => (format!(" {raw_nick}"), Color::White),
+    }
+}
+
 fn draw_users_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let buf = app.active_buf();
     let count = buf.users.len();
@@ -338,28 +350,11 @@ fn draw_users_sidebar(f: &mut Frame, app: &App, area: Rect) {
     ))));
 
     for entry in buf.users.iter().skip(buf.user_scroll_offset) {
-        let (prefix, raw_nick) = strip_user_prefix(entry);
-        let (prefix_str, prefix_style) = match prefix {
-            Some(p @ ('~' | '&' | '@')) => (
-                format!(" {p}"),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Some(p @ ('%' | '+')) => (
-                format!(" {p}"),
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            _ => ("  ".to_string(), Style::default()),
-        };
-
-        let n_color = nick_color(raw_nick);
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(prefix_str, prefix_style),
-            Span::styled(raw_nick.to_string(), Style::default().fg(n_color)),
-        ])));
+        let (label, color) = format_user_list_entry(entry);
+        items.push(ListItem::new(Line::from(Span::styled(
+            label,
+            Style::default().fg(color),
+        ))));
     }
 
     let list = List::new(items).block(Block::default().borders(Borders::LEFT));
@@ -716,6 +711,34 @@ mod tests {
     fn deterministic_nick_color_ignores_role_prefix_and_case() {
         assert_eq!(nick_color("alice"), nick_color("@Alice"));
         assert_eq!(nick_color("ferris"), nick_color("+FERRIS"));
+    }
+
+    #[test]
+    fn formats_user_list_entries_by_role_rank_and_color() {
+        assert_eq!(
+            format_user_list_entry("~owner"),
+            (" owner".to_string(), Color::Red)
+        );
+        assert_eq!(
+            format_user_list_entry("&admin"),
+            (" admin".to_string(), Color::Rgb(255, 165, 0))
+        );
+        assert_eq!(
+            format_user_list_entry("@op"),
+            (" op".to_string(), Color::Yellow)
+        );
+        assert_eq!(
+            format_user_list_entry("%halfop"),
+            (" halfop".to_string(), Color::Green)
+        );
+        assert_eq!(
+            format_user_list_entry("+voiced"),
+            (" voiced (+)".to_string(), Color::White)
+        );
+        assert_eq!(
+            format_user_list_entry("regular"),
+            (" regular".to_string(), Color::White)
+        );
     }
 
     #[test]
