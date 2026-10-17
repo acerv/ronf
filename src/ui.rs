@@ -121,8 +121,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let tree_rows = build_tree_rows(app);
     let mut items = Vec::with_capacity(tree_rows.len());
+    let mut active_row_idx = 0usize;
 
-    for row in tree_rows {
+    for (idx, row) in tree_rows.into_iter().enumerate() {
         match row {
             TreeRow::Separator => {
                 items.push(ListItem::new(Line::from("")));
@@ -133,6 +134,9 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 unread,
                 ..
             } => {
+                if active {
+                    active_row_idx = idx;
+                }
                 let prefix = if active { "> " } else { "  " };
                 let style = if active {
                     Style::default()
@@ -158,6 +162,9 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 highlight,
                 ..
             } => {
+                if active {
+                    active_row_idx = idx;
+                }
                 let prefix = if active { "> " } else { "  " };
                 let conn_style = if active {
                     Style::default()
@@ -189,7 +196,15 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let list = List::new(items).block(Block::default().borders(Borders::RIGHT));
+    let height = area.height as usize;
+    let offset = if height > 0 && active_row_idx >= height {
+        active_row_idx + 1 - height
+    } else {
+        0
+    };
+    let visible_items: Vec<ListItem> = items.into_iter().skip(offset).collect();
+
+    let list = List::new(visible_items).block(Block::default().borders(Borders::RIGHT));
     f.render_widget(list, area);
 }
 
