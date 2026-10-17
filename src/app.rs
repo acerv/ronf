@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -32,6 +32,8 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/list",
     "/buffer",
     "/reconnect",
+    "/ignore",
+    "/unignore",
     "/raw",
     "/quote",
     "/clear",
@@ -282,6 +284,8 @@ pub enum UserCommand {
     List(Option<String>),
     Buffer(String),
     Reconnect,
+    Ignore(Option<String>),
+    Unignore(String),
     Raw(String),
     Clear,
     Close,
@@ -510,6 +514,14 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             }
         }
         "/reconnect" => Some(UserCommand::Reconnect),
+        "/ignore" => {
+            let nick = rest.split_whitespace().next().map(str::to_string);
+            Some(UserCommand::Ignore(nick))
+        }
+        "/unignore" => {
+            let nick = rest.split_whitespace().next()?;
+            Some(UserCommand::Unignore(nick.to_string()))
+        }
         "/raw" | "/quote" => {
             if rest.is_empty() {
                 None
@@ -559,6 +571,7 @@ pub struct App {
     pub buffers: Vec<Buffer>,
     pub active_buffer: usize,
     pub nicks: BTreeMap<String, String>,
+    pub ignored_nicks: BTreeSet<String>,
     pub senders: HashMap<String, Sender>,
     pub input: String,
     pub cursor_pos: usize,
@@ -611,6 +624,7 @@ impl App {
             buffers,
             active_buffer: 0,
             nicks,
+            ignored_nicks: BTreeSet::new(),
             senders: HashMap::new(),
             input: String::new(),
             cursor_pos: 0,
@@ -1315,6 +1329,35 @@ impl App {
                     ),
                 );
             }
+            UserCommand::Ignore(maybe_nick) => match maybe_nick {
+                Some(nick) => {
+                    self.ignored_nicks.insert(nick.to_ascii_lowercase());
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(None, format!("* Ignoring {nick}"), LineKind::System),
+                    );
+                }
+                None => {
+                    let msg = if self.ignored_nicks.is_empty() {
+                        "* No users are currently ignored".to_string()
+                    } else {
+                        let list: Vec<&str> =
+                            self.ignored_nicks.iter().map(String::as_str).collect();
+                        format!("* Ignored users: {}", list.join(", "))
+                    };
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(None, msg, LineKind::System),
+                    );
+                }
+            },
+            UserCommand::Unignore(nick) => {
+                self.ignored_nicks.remove(&nick.to_ascii_lowercase());
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(None, format!("* Unignored {nick}"), LineKind::System),
+                );
+            }
             UserCommand::Raw(raw_cmd) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
@@ -1430,6 +1473,9 @@ impl App {
 
     pub fn handle_irc_message(&mut self, server_id: &str, msg: Message) {
         let sender_nick = extract_nick(&msg.prefix);
+        let is_ignored = sender_nick
+            .as_deref()
+            .is_some_and(|n| self.ignored_nicks.contains(&n.to_ascii_lowercase()));
         let my_nick = self
             .nicks
             .get(server_id)
@@ -1437,6 +1483,7 @@ impl App {
             .unwrap_or_else(|| "irc_user".to_string());
 
         match msg.command {
+            Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
             Command::PRIVMSG(target, text) => {
                 let is_channel = target.starts_with('#') || target.starts_with('&');
                 let (buf_name, buf_kind) = if is_channel {
@@ -2420,5 +2467,33 @@ mod tests {
         assert!(app.buffers[active].messages[before + 1]
             .content
             .contains("is using a secure connection"));
+    }
+
+    #[test]
+    fn ignore_and_unignore_filters_messages() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+
+        app.execute_user_command(UserCommand::Ignore(Some("SpamBot".into())));
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("spambot".into(), "s".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "buy cheap stuff".into()),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].messages.len(), 0);
+
+        app.execute_user_command(UserCommand::Unignore("spambot".into()));
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("spambot".into(), "s".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "hello again".into()),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].messages.len(), 1);
     }
 }
