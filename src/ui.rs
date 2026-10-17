@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{strip_user_prefix, App, BufferKind, ChatLine, LineKind};
+use crate::app::{contains_nick_mention, strip_user_prefix, App, BufferKind, ChatLine, LineKind};
 
 const NICK_PALETTE: &[Color] = &[
     Color::Cyan,
@@ -46,6 +46,7 @@ pub enum TreeRow {
         name: String,
         active: bool,
         unread: bool,
+        highlight: bool,
     },
     Separator,
 }
@@ -58,6 +59,7 @@ pub fn build_tree_rows(app: &App) -> Vec<TreeRow> {
         let buf = &app.buffers[i];
         let active = i == app.active_buffer;
         let unread = buf.unread;
+        let highlight = buf.highlight;
 
         if buf.kind == BufferKind::Server {
             if !rows.is_empty() {
@@ -77,6 +79,7 @@ pub fn build_tree_rows(app: &App) -> Vec<TreeRow> {
                 name: buf.name.clone(),
                 active,
                 unread,
+                highlight,
             });
         }
     }
@@ -152,6 +155,7 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 name,
                 active,
                 unread,
+                highlight,
                 ..
             } => {
                 let prefix = if active { "> " } else { "  " };
@@ -165,6 +169,10 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 let name_style = if active {
                     Style::default()
                         .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if highlight {
+                    Style::default()
+                        .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
                 } else if unread {
                     Style::default()
@@ -221,9 +229,18 @@ fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
 
     match line.kind {
         LineKind::Normal => {
+            let is_self = line
+                .sender
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case(my_nick))
+                .unwrap_or(false);
+            let mentioned = !is_self && contains_nick_mention(&line.content, my_nick);
+
             if let Some(sender) = &line.sender {
-                let n_color = if sender.eq_ignore_ascii_case(my_nick) {
+                let n_color = if is_self {
                     Color::Cyan
+                } else if mentioned {
+                    Color::Yellow
                 } else {
                     nick_color(sender)
                 };
@@ -234,10 +251,14 @@ fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
                 ));
                 spans.push(Span::styled("> ", Style::default().fg(Color::Gray)));
             }
-            spans.extend(parse_irc_spans(
-                &line.content,
-                Style::default().fg(Color::Reset),
-            ));
+            let body_style = if mentioned {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Reset)
+            };
+            spans.extend(parse_irc_spans(&line.content, body_style));
         }
         LineKind::Action => {
             let actor = line.sender.as_deref().unwrap_or("*");
@@ -662,6 +683,7 @@ mod tests {
                     name: "#linux".into(),
                     active: false,
                     unread: false,
+                    highlight: false,
                 },
                 TreeRow::Child {
                     buffer_idx: 2,
@@ -669,6 +691,7 @@ mod tests {
                     name: "#rust".into(),
                     active: false,
                     unread: false,
+                    highlight: false,
                 },
                 TreeRow::Separator,
                 TreeRow::Server {
@@ -683,6 +706,7 @@ mod tests {
                     name: "#debian".into(),
                     active: false,
                     unread: false,
+                    highlight: false,
                 },
             ]
         );

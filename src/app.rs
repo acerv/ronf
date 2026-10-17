@@ -61,6 +61,7 @@ pub struct Buffer {
     pub messages: Vec<ChatLine>,
     pub scroll_offset: usize,
     pub unread: bool,
+    pub highlight: bool,
 }
 
 impl Buffer {
@@ -76,6 +77,7 @@ impl Buffer {
             messages: Vec::new(),
             scroll_offset: 0,
             unread: false,
+            highlight: false,
         }
     }
 
@@ -549,6 +551,7 @@ impl App {
         if index < self.buffers.len() {
             self.active_buffer = index;
             self.buffers[index].unread = false;
+            self.buffers[index].highlight = false;
             self.buffers[index].scroll_offset = 0;
         }
     }
@@ -1247,6 +1250,7 @@ impl App {
                 }
                 if !self.buffers.is_empty() {
                     self.buffers[self.active_buffer].unread = false;
+                    self.buffers[self.active_buffer].highlight = false;
                 }
             }
             UserCommand::Quit(reason) => {
@@ -1330,7 +1334,40 @@ impl App {
                     )
                 };
 
+                let is_new_dm = !is_channel && self.find_buffer(server_id, &buf_name).is_none();
                 let idx = self.ensure_buffer(server_id, &buf_name, buf_kind);
+                let is_from_self = sender_nick
+                    .as_deref()
+                    .map(|s| s.eq_ignore_ascii_case(&my_nick))
+                    .unwrap_or(false);
+
+                let display_text = strip_ctcp_action(&text).unwrap_or(&text);
+                let is_mentioned = is_channel
+                    && !is_from_self
+                    && contains_nick_mention(display_text, &my_nick);
+
+                if !is_from_self && (is_new_dm || !is_channel || is_mentioned) {
+                    if idx != self.active_buffer {
+                        self.buffers[idx].highlight = true;
+                    }
+                    if is_new_dm {
+                        send_desktop_notification(
+                            &format!("New conversation from {buf_name} ({server_id})"),
+                            display_text,
+                        );
+                    } else if is_mentioned {
+                        let from = sender_nick.as_deref().unwrap_or("someone");
+                        send_desktop_notification(
+                            &format!("Mentioned by {from} in {buf_name} ({server_id})"),
+                            display_text,
+                        );
+                    } else if !is_channel && idx != self.active_buffer {
+                        send_desktop_notification(
+                            &format!("Message from {buf_name} ({server_id})"),
+                            display_text,
+                        );
+                    }
+                }
 
                 if let Some(action) = strip_ctcp_action(&text) {
                     self.push_to_buffer(
@@ -1714,6 +1751,46 @@ fn strip_ctcp_action(text: &str) -> Option<&str> {
     Some(rest.strip_suffix('\x01').unwrap_or(rest))
 }
 
+pub fn contains_nick_mention(text: &str, nick: &str) -> bool {
+    let nick_clean = strip_user_prefix(nick).1.trim();
+    if nick_clean.is_empty() {
+        return false;
+    }
+
+    let text_lower = text.to_ascii_lowercase();
+    let nick_lower = nick_clean.to_ascii_lowercase();
+    let is_nick_char = |b: u8| {
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'[' | b']' | b'{' | b'}' | b'\\' | b'|' | b'^' | b'`')
+    };
+
+    let text_bytes = text_lower.as_bytes();
+    let nick_len = nick_lower.len();
+
+    for (pos, _) in text_lower.match_indices(&nick_lower) {
+        let before_ok = pos == 0 || !is_nick_char(text_bytes[pos - 1]);
+        let after_pos = pos + nick_len;
+        let after_ok = after_pos >= text_bytes.len() || !is_nick_char(text_bytes[after_pos]);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(not(test))]
+fn send_desktop_notification(summary: &str, body: &str) {
+    let _ = notify_rust::Notification::new()
+        .appname("ronf")
+        .summary(summary)
+        .body(body)
+        .icon("user-available")
+        .show();
+}
+
+#[cfg(test)]
+fn send_desktop_notification(_summary: &str, _body: &str) {}
+
 fn prev_char_boundary(s: &str, byte_idx: usize) -> usize {
     s[..byte_idx]
         .char_indices()
@@ -2011,5 +2088,43 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn detects_nick_mentions_and_new_dm_conversations() {
+        assert!(contains_nick_mention("hey irc_user, how are you?", "irc_user"));
+        assert!(contains_nick_mention("irc_user: ping", "irc_user"));
+        assert!(!contains_nick_mention("other_irc_user_2 hello", "irc_user"));
+
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+
+        // Mention in inactive #rust channel sets highlight = true
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "ping irc_user!".into()),
+            },
+        );
+        assert!(app.buffers[rust_idx].highlight);
+
+        // Selecting #rust clears highlight
+        app.select_buffer(rust_idx);
+        assert!(!app.buffers[rust_idx].highlight);
+
+        // Incoming new DM creates buffer and sets highlight = true
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("bob".into(), "b".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "hey there!".into()),
+            },
+        );
+        let dm_idx = app.find_buffer("libera", "bob").unwrap();
+        assert_eq!(app.buffers[dm_idx].kind, BufferKind::DirectMessage);
+        assert!(app.buffers[dm_idx].highlight);
     }
 }
