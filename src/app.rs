@@ -583,6 +583,7 @@ pub struct App {
     pub buffers: Vec<Buffer>,
     pub active_buffer: usize,
     pub nicks: BTreeMap<String, String>,
+    pub show_join_part: BTreeMap<String, bool>,
     pub ignored_nicks: BTreeSet<String>,
     pub senders: HashMap<String, Sender>,
     pub input: String,
@@ -601,6 +602,7 @@ impl App {
     pub fn from_config(config: &AppConfig) -> Self {
         let mut buffers = Vec::new();
         let mut nicks = BTreeMap::new();
+        let mut show_join_part = BTreeMap::new();
         let log_dir = config.effective_log_dir();
 
         for (server_id, srv) in config.enabled_servers() {
@@ -608,6 +610,10 @@ impl App {
                 .effective_nickname(config.default_nickname.as_deref())
                 .unwrap_or_else(|_| "irc_user".to_string());
             nicks.insert(server_id.clone(), nick);
+            show_join_part.insert(
+                server_id.clone(),
+                srv.effective_show_join_part(config.show_join_part),
+            );
 
             let mut srv_buf = Buffer::new(server_id.clone(), server_id.clone(), BufferKind::Server);
             srv_buf.push_line(
@@ -642,6 +648,7 @@ impl App {
             buffers,
             active_buffer: 0,
             nicks,
+            show_join_part,
             ignored_nicks: BTreeSet::new(),
             senders: HashMap::new(),
             input: String::new(),
@@ -1620,29 +1627,43 @@ impl App {
                 let idx = self.ensure_buffer(server_id, &chan, BufferKind::Channel);
                 if let Some(nick) = sender_nick {
                     self.buffers[idx].add_user(&nick);
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("--> {nick} has joined {chan}"),
-                            LineKind::System,
-                        ),
-                    );
+                    let should_show = self
+                        .show_join_part
+                        .get(server_id)
+                        .copied()
+                        .unwrap_or(true);
+                    if should_show {
+                        self.push_to_buffer(
+                            idx,
+                            ChatLine::new(
+                                None,
+                                format!("--> {nick} has joined {chan}"),
+                                LineKind::System,
+                            ),
+                        );
+                    }
                 }
             }
             Command::PART(chan, reason) => {
                 if let Some(idx) = self.find_buffer(server_id, &chan) {
                     if let Some(nick) = sender_nick {
                         self.buffers[idx].remove_user(&nick);
-                        let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-                        self.push_to_buffer(
-                            idx,
-                            ChatLine::new(
-                                None,
-                                format!("<-- {nick} has left {chan}{suffix}"),
-                                LineKind::System,
-                            ),
-                        );
+                        let should_show = self
+                            .show_join_part
+                            .get(server_id)
+                            .copied()
+                            .unwrap_or(true);
+                        if should_show {
+                            let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+                            self.push_to_buffer(
+                                idx,
+                                ChatLine::new(
+                                    None,
+                                    format!("<-- {nick} has left {chan}{suffix}"),
+                                    LineKind::System,
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -1663,6 +1684,11 @@ impl App {
             }
             Command::QUIT(reason) => {
                 if let Some(nick) = sender_nick {
+                    let should_show = self
+                        .show_join_part
+                        .get(server_id)
+                        .copied()
+                        .unwrap_or(true);
                     let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
                     let affected: Vec<usize> = self
                         .buffers
@@ -1678,15 +1704,17 @@ impl App {
                             }
                         })
                         .collect();
-                    for idx in affected {
-                        self.push_to_buffer(
-                            idx,
-                            ChatLine::new(
-                                None,
-                                format!("<-- {nick} has quit{suffix}"),
-                                LineKind::System,
-                            ),
-                        );
+                    if should_show {
+                        for idx in affected {
+                            self.push_to_buffer(
+                                idx,
+                                ChatLine::new(
+                                    None,
+                                    format!("<-- {nick} has quit{suffix}"),
+                                    LineKind::System,
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -2697,5 +2725,57 @@ mod tests {
         assert_eq!(app2.buffers[rust_idx].messages[0].content, "logged message");
 
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn suppresses_join_part_quit_when_disabled_in_config() {
+        let toml = r##"
+            default_nickname = "irc_user"
+            show_join_part = false
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##;
+        let cfg = AppConfig::from_toml_str(toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+
+        // JOIN adds user to users list, but doesn't post system message
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::JOIN("#rust".into(), None, None),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].users, vec!["alice"]);
+        assert_eq!(app.buffers[rust_idx].messages.len(), 0);
+
+        // PART removes user, but doesn't post system message
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PART("#rust".into(), None),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].users.len(), 0);
+        assert_eq!(app.buffers[rust_idx].messages.len(), 0);
+
+        // QUIT removes user, but doesn't post system message
+        app.buffers[rust_idx].add_user("bob");
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("bob".into(), "b".into(), "h".into())),
+                command: Command::QUIT(None),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].users.len(), 0);
+        assert_eq!(app.buffers[rust_idx].messages.len(), 0);
     }
 }

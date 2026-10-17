@@ -27,6 +27,7 @@ The resulting binary will be located at `target/release/ronf`.
 
 ```toml
 default_nickname = "irc_user"
+show_join_part = true
 
 [servers.libera]
 server = "irc.libera.chat"

@@ -3,6 +3,8 @@
 # Copy to ~/.config/ronf/config.toml or keep as ./config.toml
 
 default_nickname = "irc_user"
+# Controls whether JOIN, PART, and QUIT notices appear in chat (default: true)
+show_join_part = true
 
 [servers.libera]
 server = "irc.libera.chat"

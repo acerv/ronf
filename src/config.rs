@@ -17,6 +17,7 @@ pub struct AppConfig {
     pub default_nickname: Option<String>,
     pub enable_logging: Option<bool>,
     pub log_dir: Option<String>,
+    pub show_join_part: Option<bool>,
     pub servers: BTreeMap<String, ServerConfig>,
 }
 
@@ -33,6 +34,7 @@ pub struct ServerConfig {
     pub nick_password: Option<String>,
     pub nick_password_command: Option<String>,
     pub client_cert_path: Option<String>,
+    pub show_join_part: Option<bool>,
     pub enabled: Option<bool>,
 }
 
@@ -60,6 +62,10 @@ impl ServerConfig {
 
     pub fn effective_tls(&self) -> bool {
         self.use_tls.unwrap_or(true)
+    }
+
+    pub fn effective_show_join_part(&self, global_default: Option<bool>) -> bool {
+        self.show_join_part.or(global_default).unwrap_or(true)
     }
 
     pub fn effective_port(&self) -> u16 {
@@ -314,5 +320,25 @@ mod tests {
         assert_eq!(irc_cfg.password.as_deref(), Some("my_secret_pw"));
         assert_eq!(irc_cfg.nick_password.as_deref(), Some("nickserv_pw"));
         assert_eq!(irc_cfg.client_cert_path.as_deref(), Some("/tmp/client.pem"));
+    }
+
+    #[test]
+    fn resolves_effective_show_join_part_with_override() {
+        let toml = r##"
+            default_nickname = "irc_user"
+            show_join_part = false
+
+            [servers.libera]
+            server = "irc.libera.chat"
+
+            [servers.oftc]
+            server = "irc.oftc.net"
+            show_join_part = true
+        "##;
+
+        let cfg = AppConfig::from_toml_str(toml).expect("valid config");
+        assert_eq!(cfg.show_join_part, Some(false));
+        assert!(!cfg.servers["libera"].effective_show_join_part(cfg.show_join_part));
+        assert!(cfg.servers["oftc"].effective_show_join_part(cfg.show_join_part));
     }
 }
