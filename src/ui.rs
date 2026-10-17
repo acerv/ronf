@@ -205,20 +205,42 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let inner_height = padded.height as usize;
+    let width = padded.width.max(1) as usize;
     let total_msgs = buf.messages.len();
     let end = total_msgs.saturating_sub(buf.scroll_offset);
-    let start = end.saturating_sub(inner_height);
+
+    let mut acc_rows = 0usize;
+    let mut start = end;
+    while start > 0 && acc_rows < inner_height {
+        start -= 1;
+        let formatted = format_chat_line(&buf.messages[start], my_nick);
+        acc_rows += wrapped_line_height(&formatted, width);
+    }
 
     let visible_lines: Vec<Line> = buf.messages[start..end]
         .iter()
         .map(|msg| format_chat_line(msg, my_nick))
         .collect();
 
+    let extra_scroll = acc_rows.saturating_sub(inner_height) as u16;
     let paragraph = Paragraph::new(visible_lines)
         .block(Block::default().borders(Borders::NONE))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((extra_scroll, 0));
 
     f.render_widget(paragraph, padded);
+}
+
+pub fn wrapped_line_height(line: &Line, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let char_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if char_count == 0 {
+        1
+    } else {
+        char_count.div_ceil(width)
+    }
 }
 
 fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
@@ -739,6 +761,15 @@ mod tests {
             format_user_list_entry("regular"),
             (" regular".to_string(), Color::White)
         );
+    }
+
+    #[test]
+    fn computes_wrapped_line_height_accurately() {
+        let short = Line::from("hello world");
+        assert_eq!(wrapped_line_height(&short, 80), 1);
+
+        let long = Line::from("a".repeat(165));
+        assert_eq!(wrapped_line_height(&long, 80), 3);
     }
 
     #[test]
