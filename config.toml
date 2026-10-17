@@ -1,0 +1,11 @@
+# Example configuration for ronf
+# Copy to ~/.config/ronf/config.toml or keep as ./config.toml
+
+default_nickname = "irc_user"
+
+[servers.libera]
+server = "irc.libera.chat"
+port = 6697
+use_tls = true
+channels = ["#linux", "#rust"]
+# password = "optional-password"
