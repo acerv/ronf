@@ -86,18 +86,6 @@ pub fn build_tree_rows(app: &App) -> Vec<TreeRow> {
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let v_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    draw_top_bar(f, app, v_chunks[0]);
-    f.render_widget(Block::default().borders(Borders::TOP), v_chunks[1]);
-
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -105,7 +93,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Min(1),
             Constraint::Length(20),
         ])
-        .split(v_chunks[2]);
+        .split(area);
 
     let center_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -125,52 +113,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.show_help {
         draw_help_popup(f, app);
     }
-}
-
-fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
-    let buf = app.active_buf();
-    let mut spans = vec![
-        Span::styled(
-            " ronf ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("│ ", Style::default().fg(Color::Gray)),
-    ];
-
-    match (&buf.kind, &buf.topic) {
-        (BufferKind::Server, _) => {
-            spans.push(Span::styled(
-                format!("{} (server)", buf.server_id),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-        }
-        (BufferKind::DirectMessage, _) => {
-            spans.push(Span::styled(
-                format!("{} / {}", buf.server_id, buf.name),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-        }
-        (BufferKind::Channel, Some(topic)) if !topic.is_empty() => {
-            spans.push(Span::styled(
-                format!("{} / {}", buf.server_id, buf.name),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                format!(" — {topic}"),
-                Style::default().fg(Color::Gray),
-            ));
-        }
-        (BufferKind::Channel, _) => {
-            spans.push(Span::styled(
-                format!("{} / {}", buf.server_id, buf.name),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-        }
-    }
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
