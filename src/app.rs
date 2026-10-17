@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use irc::client::Sender;
-use irc::proto::{Command, Message, Prefix, Response};
+use irc::proto::{ChannelMode, Command, Message, Mode, Prefix, Response};
 
 use crate::config::AppConfig;
 
@@ -154,6 +154,59 @@ impl Buffer {
             self.sort_users();
         }
         found
+    }
+
+    pub fn apply_channel_modes(&mut self, modes: &[Mode<ChannelMode>]) {
+        let mut changed = false;
+        for mode in modes {
+            match mode {
+                Mode::Plus(cm, Some(target)) => {
+                    if let Some(new_pref) = channel_mode_prefix(cm) {
+                        let (_, target_raw) = strip_user_prefix(target);
+                        if let Some(user) = self.users.iter_mut().find(|u| {
+                            let (_, n) = strip_user_prefix(u);
+                            n.eq_ignore_ascii_case(target_raw)
+                        }) {
+                            let (cur_pref, raw) = strip_user_prefix(user);
+                            if cur_pref.is_none_or(|cur| role_rank(Some(new_pref)) <= role_rank(Some(cur))) {
+                                *user = format!("{new_pref}{raw}");
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                Mode::Minus(cm, Some(target)) => {
+                    if let Some(rem_pref) = channel_mode_prefix(cm) {
+                        let (_, target_raw) = strip_user_prefix(target);
+                        if let Some(user) = self.users.iter_mut().find(|u| {
+                            let (_, n) = strip_user_prefix(u);
+                            n.eq_ignore_ascii_case(target_raw)
+                        }) {
+                            let (cur_pref, raw) = strip_user_prefix(user);
+                            if cur_pref == Some(rem_pref) {
+                                *user = raw.to_string();
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            self.sort_users();
+        }
+    }
+}
+
+fn channel_mode_prefix(cm: &ChannelMode) -> Option<char> {
+    match cm {
+        ChannelMode::Founder => Some('~'),
+        ChannelMode::Admin => Some('&'),
+        ChannelMode::Oper => Some('@'),
+        ChannelMode::Halfop => Some('%'),
+        ChannelMode::Voice => Some('+'),
+        _ => None,
     }
 }
 
@@ -1534,6 +1587,21 @@ impl App {
                     ),
                 );
             }
+            Command::ChannelMODE(chan, modes) => {
+                if let Some(idx) = self.find_buffer(server_id, &chan) {
+                    self.buffers[idx].apply_channel_modes(&modes);
+                    let by = sender_nick.unwrap_or_else(|| "server".to_string());
+                    let mode_strs: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
+                    self.push_to_buffer(
+                        idx,
+                        ChatLine::new(
+                            None,
+                            format!("* {by} sets mode {} on {chan}", mode_strs.join(" ")),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
             Command::Response(resp, args) => {
                 self.handle_numeric_response(server_id, resp, args);
             }
@@ -2010,6 +2078,40 @@ mod tests {
                 tags: None,
                 prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
                 command: Command::PART("#rust".into(), None),
+            },
+        );
+        assert_eq!(
+            app.buffers[rust_idx].users,
+            vec!["@ferris_bot", "+bob", "charlie"]
+        );
+
+        // ChannelMODE +o charlie promotes charlie to @charlie and re-sorts
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("ChanServ".into(), "c".into(), "h".into())),
+                command: Command::ChannelMODE(
+                    "#rust".into(),
+                    vec![Mode::Plus(ChannelMode::Oper, Some("charlie".into()))],
+                ),
+            },
+        );
+        assert_eq!(
+            app.buffers[rust_idx].users,
+            vec!["@charlie", "@ferris_bot", "+bob"]
+        );
+
+        // ChannelMODE -o charlie demotes charlie back to regular user
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("ChanServ".into(), "c".into(), "h".into())),
+                command: Command::ChannelMODE(
+                    "#rust".into(),
+                    vec![Mode::Minus(ChannelMode::Oper, Some("charlie".into()))],
+                ),
             },
         );
         assert_eq!(
