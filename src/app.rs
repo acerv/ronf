@@ -10,7 +10,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/nick", "/me", "/topic", "/whois", "/close", "/quit",
+    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/close",
+    "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +174,7 @@ pub enum UserCommand {
     Join(String),
     Part(Option<String>),
     Msg { target: String, text: String },
+    Query { target: String, text: Option<String> },
     Nick(String),
     Me(String),
     Topic(Option<String>),
@@ -220,7 +222,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             };
             Some(UserCommand::Part(reason))
         }
-        "/msg" | "/query" => {
+        "/msg" => {
             let (target, text) = rest.split_once(char::is_whitespace)?;
             let text = text.trim();
             if target.is_empty() || text.is_empty() {
@@ -229,6 +231,26 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 Some(UserCommand::Msg {
                     target: target.to_string(),
                     text: text.to_string(),
+                })
+            }
+        }
+        "/query" => {
+            if rest.is_empty() {
+                None
+            } else if let Some((target, text)) = rest.split_once(char::is_whitespace) {
+                let text = text.trim();
+                Some(UserCommand::Query {
+                    target: target.to_string(),
+                    text: if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.to_string())
+                    },
+                })
+            } else {
+                Some(UserCommand::Query {
+                    target: rest.to_string(),
+                    text: None,
                 })
             }
         }
@@ -827,6 +849,19 @@ impl App {
                 self.push_to_buffer(idx, ChatLine::new(Some(active_nick), text, LineKind::Normal));
                 self.select_buffer(idx);
             }
+            UserCommand::Query { target, text } => {
+                let idx = self.ensure_buffer(&server_id, &target, BufferKind::DirectMessage);
+                if let Some(msg_text) = text {
+                    if let Some(sender) = self.senders.get(&server_id) {
+                        let _ = sender.send_privmsg(&target, &msg_text);
+                    }
+                    self.push_to_buffer(
+                        idx,
+                        ChatLine::new(Some(active_nick), msg_text, LineKind::Normal),
+                    );
+                }
+                self.select_buffer(idx);
+            }
             UserCommand::Nick(new_nick) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     let _ = sender.send(Command::NICK(new_nick.clone()));
@@ -1410,6 +1445,13 @@ mod tests {
             Some(UserCommand::Msg {
                 target: "alice".to_string(),
                 text: "hello there".to_string()
+            })
+        );
+        assert_eq!(
+            parse_user_command("/query alice"),
+            Some(UserCommand::Query {
+                target: "alice".to_string(),
+                text: None
             })
         );
         assert_eq!(
