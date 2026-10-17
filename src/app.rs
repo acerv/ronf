@@ -10,8 +10,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/clear",
-    "/close", "/quit",
+    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/raw",
+    "/quote", "/clear", "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +179,7 @@ pub enum UserCommand {
     Me(String),
     Topic(Option<String>),
     Whois(String),
+    Raw(String),
     Clear,
     Close,
     Quit(Option<String>),
@@ -284,6 +285,13 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 None
             } else {
                 Some(UserCommand::Whois(target.to_string()))
+            }
+        }
+        "/raw" | "/quote" => {
+            if rest.is_empty() {
+                None
+            } else {
+                Some(UserCommand::Raw(rest.to_string()))
             }
         }
         "/clear" => Some(UserCommand::Clear),
@@ -950,6 +958,23 @@ impl App {
                     ),
                 );
             }
+            UserCommand::Raw(raw_cmd) => {
+                if let Some(sender) = self.senders.get(&server_id) {
+                    if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
+                        let _ = sender.send(msg);
+                    } else {
+                        let mut parts = raw_cmd.split_whitespace();
+                        if let Some(verb) = parts.next() {
+                            let args: Vec<String> = parts.map(str::to_string).collect();
+                            let _ = sender.send(Command::Raw(verb.to_string(), args));
+                        }
+                    }
+                }
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(None, format!("* >> {raw_cmd}"), LineKind::System),
+                );
+            }
             UserCommand::Clear => {
                 let buf = self.active_buf_mut();
                 buf.messages.clear();
@@ -1434,6 +1459,14 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(
+            parse_user_command("/raw PRIVMSG NickServ :IDENTIFY pass"),
+            Some(UserCommand::Raw("PRIVMSG NickServ :IDENTIFY pass".to_string()))
+        );
+        assert_eq!(
+            parse_user_command("/quote PING 123"),
+            Some(UserCommand::Raw("PING 123".to_string()))
+        );
         assert_eq!(parse_user_command("/clear"), Some(UserCommand::Clear));
         assert_eq!(
             parse_user_command("/whois alice"),

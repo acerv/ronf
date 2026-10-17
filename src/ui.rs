@@ -389,6 +389,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("/me <action>", "Send CTCP action message"),
                 ("/topic [text]", "View or set channel topic"),
                 ("/whois <nick>", "Query user info via WHOIS"),
+                ("/raw <irc_line>", "Send raw IRC protocol line"),
                 ("/clear", "Clear active buffer history"),
                 ("/close", "Close active channel or DM"),
                 ("/quit [reason]", "Disconnect all and exit"),
