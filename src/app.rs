@@ -89,6 +89,13 @@ impl Buffer {
     }
 
     pub fn sort_users(&mut self) {
+        for user in &mut self.users {
+            let (pref, raw) = strip_user_prefix(user);
+            *user = match pref {
+                Some(p) => format!("{p}{raw}"),
+                None => raw.to_string(),
+            };
+        }
         self.users.sort_by(|a, b| {
             let (pref_a, nick_a) = strip_user_prefix(a);
             let (pref_b, nick_b) = strip_user_prefix(b);
@@ -151,13 +158,21 @@ impl Buffer {
 }
 
 pub fn strip_user_prefix(entry: &str) -> (Option<char>, &str) {
-    let mut chars = entry.chars();
-    if let Some(first) = chars.next() {
-        if matches!(first, '~' | '&' | '@' | '%' | '+') {
-            return (Some(first), chars.as_str());
+    let mut best_prefix: Option<char> = None;
+    let mut byte_offset = 0;
+
+    for ch in entry.chars() {
+        if matches!(ch, '~' | '&' | '@' | '%' | '+') {
+            byte_offset += ch.len_utf8();
+            if best_prefix.is_none_or(|cur| role_rank(Some(ch)) < role_rank(Some(cur))) {
+                best_prefix = Some(ch);
+            }
+        } else {
+            break;
         }
     }
-    (None, entry)
+
+    (best_prefix, &entry[byte_offset..])
 }
 
 fn role_rank(prefix: Option<char>) -> u8 {
@@ -1952,7 +1967,7 @@ mod tests {
                         "irc_user".into(),
                         "=".into(),
                         "#rust".into(),
-                        "charlie +bob @ferris alice".into(),
+                        "charlie +bob @+ferris alice".into(),
                     ],
                 ),
             },
