@@ -15,6 +15,8 @@ pub const DEFAULT_GENERIC_NICK: &str = "irc_user";
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub default_nickname: Option<String>,
+    pub enable_logging: Option<bool>,
+    pub log_dir: Option<String>,
     pub servers: BTreeMap<String, ServerConfig>,
 }
 
@@ -166,6 +168,27 @@ impl AppConfig {
             .ok()
             .filter(|h| !h.trim().is_empty())
             .map(|home| PathBuf::from(home).join(".config").join("ronf").join("config.toml"))
+    }
+
+    pub fn effective_log_dir(&self) -> Option<PathBuf> {
+        if !self.enable_logging.unwrap_or(false) {
+            return None;
+        }
+        if let Some(dir) = &self.log_dir {
+            return Some(PathBuf::from(dir));
+        }
+        if let Ok(xdg_data) = env::var("XDG_DATA_HOME") {
+            if !xdg_data.trim().is_empty() {
+                return Some(PathBuf::from(xdg_data).join("ronf").join("logs"));
+            }
+        }
+        env::var("HOME").ok().map(|h| {
+            PathBuf::from(h)
+                .join(".local")
+                .join("share")
+                .join("ronf")
+                .join("logs")
+        })
     }
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {

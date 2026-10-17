@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -588,6 +591,7 @@ pub struct App {
     pub history_index: Option<usize>,
     pub saved_draft: String,
     pub tab_state: Option<TabCompletionState>,
+    pub log_dir: Option<PathBuf>,
     pub show_help: bool,
     pub help_scroll: usize,
     pub should_quit: bool,
@@ -597,6 +601,7 @@ impl App {
     pub fn from_config(config: &AppConfig) -> Self {
         let mut buffers = Vec::new();
         let mut nicks = BTreeMap::new();
+        let log_dir = config.effective_log_dir();
 
         for (server_id, srv) in config.enabled_servers() {
             let nick = srv
@@ -621,11 +626,15 @@ impl App {
             buffers.push(srv_buf);
 
             for chan in &srv.channels {
-                buffers.push(Buffer::new(
+                let mut chan_buf = Buffer::new(
                     server_id.clone(),
                     chan.clone(),
                     BufferKind::Channel,
-                ));
+                );
+                if let Some(ref dir) = log_dir {
+                    load_buffer_history(dir, &mut chan_buf);
+                }
+                buffers.push(chan_buf);
             }
         }
 
@@ -641,6 +650,7 @@ impl App {
             history_index: None,
             saved_draft: String::new(),
             tab_state: None,
+            log_dir,
             show_help: false,
             help_scroll: 0,
             should_quit: false,
@@ -731,7 +741,10 @@ impl App {
             .map(|pos| pos + 1)
             .unwrap_or(self.buffers.len());
 
-        let buf = Buffer::new(server_id.to_string(), name.to_string(), kind);
+        let mut buf = Buffer::new(server_id.to_string(), name.to_string(), kind);
+        if let Some(ref dir) = self.log_dir {
+            load_buffer_history(dir, &mut buf);
+        }
         self.buffers.insert(insert_pos, buf);
 
         if insert_pos <= self.active_buffer {
@@ -744,6 +757,13 @@ impl App {
     pub fn push_to_buffer(&mut self, idx: usize, line: ChatLine) {
         let is_active = idx == self.active_buffer;
         if let Some(buf) = self.buffers.get_mut(idx) {
+            if let Some(ref dir) = self.log_dir {
+                if buf.kind != BufferKind::Server
+                    && matches!(line.kind, LineKind::Normal | LineKind::Action)
+                {
+                    append_buffer_log(dir, &buf.server_id, &buf.name, &line);
+                }
+            }
             buf.push_line(line, is_active);
         }
     }
@@ -2089,6 +2109,83 @@ fn next_char_boundary(s: &str, byte_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
+    let safe_srv: String = server_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let safe_buf: String = buf_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '#' | '&' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    base_dir.join(safe_srv).join(format!("{safe_buf}.log"))
+}
+
+fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
+    let path = buffer_log_path(base_dir, server_id, buf_name);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        match (&line.kind, &line.sender) {
+            (LineKind::Action, Some(sender)) => {
+                let _ = writeln!(file, "[{}] * {} {}", line.timestamp, sender, line.content);
+            }
+            (_, Some(sender)) => {
+                let _ = writeln!(file, "[{}] <{}> {}", line.timestamp, sender, line.content);
+            }
+            (_, None) => {
+                let _ = writeln!(file, "[{}] {}", line.timestamp, line.content);
+            }
+        }
+    }
+}
+
+fn load_buffer_history(base_dir: &Path, buf: &mut Buffer) {
+    if buf.kind == BufferKind::Server {
+        return;
+    }
+    let path = buffer_log_path(base_dir, &buf.server_id, &buf.name);
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start = all_lines.len().saturating_sub(100);
+    for raw in &all_lines[start..] {
+        if let Some(rest) = raw.strip_prefix('[') {
+            if let Some((ts, after_ts)) = rest.split_once("] ") {
+                if let Some(action_rest) = after_ts.strip_prefix("* ") {
+                    if let Some((actor, act_text)) = action_rest.split_once(' ') {
+                        buf.messages.push(ChatLine {
+                            timestamp: ts.to_string(),
+                            sender: Some(actor.to_string()),
+                            content: act_text.to_string(),
+                            kind: LineKind::Action,
+                        });
+                        continue;
+                    }
+                } else if let Some(nick_rest) = after_ts.strip_prefix('<') {
+                    if let Some((sender, msg_text)) = nick_rest.split_once("> ") {
+                        buf.messages.push(ChatLine {
+                            timestamp: ts.to_string(),
+                            sender: Some(sender.to_string()),
+                            content: msg_text.to_string(),
+                            kind: LineKind::Normal,
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2562,5 +2659,43 @@ mod tests {
         assert!(app.buffers[rust_idx].messages[1]
             .content
             .contains("* [search]"));
+    }
+
+    #[test]
+    fn persists_and_reloads_chat_logs() {
+        let tmp_dir = std::env::temp_dir().join(format!("ronf_test_logs_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            enable_logging = true
+            log_dir = "{}"
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "logged message".into()),
+            },
+        );
+
+        // Reload new App instance from same config and verify history is loaded
+        let app2 = App::from_config(&cfg);
+        let rust_idx = app2.find_buffer("libera", "#rust").unwrap();
+        assert_eq!(app2.buffers[rust_idx].messages.len(), 1);
+        assert_eq!(app2.buffers[rust_idx].messages[0].content, "logged message");
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }
