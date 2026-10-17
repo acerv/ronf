@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use ratatui::layout::{Constraint, Direction, Layout, Position};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{strip_user_prefix, App, BufferKind, ChatLine, LineKind};
@@ -112,6 +112,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_chat_pane(f, app, center_chunks[0]);
     draw_input_box(f, app, center_chunks[1]);
     draw_users_sidebar(f, app, columns[2]);
+
+    if app.show_help {
+        draw_help_popup(f, app);
+    }
 }
 
 fn draw_tree_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -336,13 +340,15 @@ fn draw_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let paragraph = Paragraph::new(visible_input).block(block);
     f.render_widget(paragraph, area);
 
-    let cursor_x = area
-        .x
-        .saturating_add(1)
-        .saturating_add((cursor_chars - horizontal_scroll) as u16)
-        .min(area.right().saturating_sub(2));
-    let cursor_y = area.y.saturating_add(1);
-    f.set_cursor_position(Position::new(cursor_x, cursor_y));
+    if !app.show_help {
+        let cursor_x = area
+            .x
+            .saturating_add(1)
+            .saturating_add((cursor_chars - horizontal_scroll) as u16)
+            .min(area.right().saturating_sub(2));
+        let cursor_y = area.y.saturating_add(1);
+        f.set_cursor_position(Position::new(cursor_x, cursor_y));
+    }
 }
 
 fn draw_users_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -392,6 +398,126 @@ fn draw_users_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let list = List::new(items).block(block);
     f.render_widget(list, area);
+}
+
+pub fn build_help_lines() -> Vec<Line<'static>> {
+    let section_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(Color::White);
+
+    let entry = |key: &'static str, desc: &'static str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {key:<24}"), key_style),
+            Span::styled(desc, desc_style),
+        ])
+    };
+
+    vec![
+        Line::from(Span::styled(
+            " Tree & Buffer Navigation",
+            section_style,
+        )),
+        entry("Ctrl+N / Alt+Down", "Select next buffer in tree"),
+        entry("Ctrl+P / Alt+Up", "Select previous buffer in tree"),
+        entry("Alt+A", "Jump to next unread buffer (*)"),
+        entry("Alt+1 .. Alt+9", "Jump directly to buffer 1..9"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Scrolling (Chat & Users List)",
+            section_style,
+        )),
+        entry("PageUp / PageDown", "Scroll chat history up / down"),
+        entry("Alt+PageUp / Alt+PageDown", "Scroll right-hand Users list up / down"),
+        entry("Esc", "Snap chat scrollback to latest messages"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Input Editing & Completion (Readline)",
+            section_style,
+        )),
+        entry("Tab", "Complete nick or /command (cycle matches)"),
+        entry("Up / Down", "Cycle through sent message history"),
+        entry("Left / Right", "Move cursor one character"),
+        entry("Home (Ctrl+A)", "Move cursor to start of input line"),
+        entry("End (Ctrl+E)", "Move cursor to end of input line"),
+        entry("Backspace / Delete", "Delete character before / at cursor"),
+        entry("Ctrl+W", "Delete word before cursor"),
+        entry("Ctrl+U", "Clear entire input line"),
+        entry("Enter", "Send message or execute /command"),
+        Line::from(""),
+        Line::from(Span::styled(" Slash Commands", section_style)),
+        entry("/help", "Open this scrollable help dialog"),
+        entry("/join <#channel>", "Join channel on active server"),
+        entry("/part [reason]", "Leave current channel"),
+        entry("/msg <target> <text>", "Send private or channel message"),
+        entry("/nick <newnick>", "Change nickname on active server"),
+        entry("/me <action>", "Send CTCP action to active buffer"),
+        entry("/close", "Close active channel or DM buffer"),
+        entry("/quit [reason]", "Disconnect from all servers and exit"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Application & Help Dialog Controls",
+            section_style,
+        )),
+        entry("Up / Down / j / k", "Scroll help dialog one line"),
+        entry("PgUp / PgDn / Ctrl+U/D", "Scroll help dialog by page"),
+        entry("Home (g) / End (G)", "Jump to top / bottom of help dialog"),
+        entry("Esc / q / Enter", "Close help dialog"),
+        entry("Ctrl+C / Ctrl+Q", "Quit ronf"),
+    ]
+}
+
+fn draw_help_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(72, 80, f.area());
+    f.render_widget(Clear, area);
+
+    let lines = build_help_lines();
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_height);
+    let scroll = app.help_scroll.min(max_scroll) as u16;
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Help — Keybindings & Commands ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " [↑/↓/j/k/PgUp/PgDn: Scroll | Esc/q/Enter: Close] ",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll, 0));
+
+    f.render_widget(paragraph, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 /// Parses mIRC formatting codes (`\x02` bold, `\x1d` italic, `\x1f` underline,
@@ -605,5 +731,21 @@ mod tests {
 
         assert_eq!(spans[3].content, " plain");
         assert_eq!(spans[3].style, base);
+    }
+
+    #[test]
+    fn help_lines_contain_organized_sections() {
+        let lines = build_help_lines();
+        let combined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(combined.contains("Tree & Buffer Navigation"));
+        assert!(combined.contains("Scrolling (Chat & Users List)"));
+        assert!(combined.contains("Input Editing & Completion (Readline)"));
+        assert!(combined.contains("Slash Commands"));
+        assert!(combined.contains("/help"));
     }
 }

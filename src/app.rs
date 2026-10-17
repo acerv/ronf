@@ -9,7 +9,9 @@ use irc::proto::{Command, Message, Prefix, Response};
 
 use crate::config::AppConfig;
 
-pub const SLASH_COMMANDS: &[&str] = &["/join", "/part", "/msg", "/nick", "/me", "/close", "/quit"];
+pub const SLASH_COMMANDS: &[&str] = &[
+    "/help", "/join", "/part", "/msg", "/nick", "/me", "/close", "/quit",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -167,6 +169,7 @@ fn role_rank(prefix: Option<char>) -> u8 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserCommand {
+    Help,
     Join(String),
     Part(Option<String>),
     Msg { target: String, text: String },
@@ -193,6 +196,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
     };
 
     match cmd.as_str() {
+        "/help" | "/h" | "/?" => Some(UserCommand::Help),
         "/join" | "/j" => {
             if rest.is_empty() {
                 None
@@ -289,6 +293,8 @@ pub struct App {
     pub history_index: Option<usize>,
     pub saved_draft: String,
     pub tab_state: Option<TabCompletionState>,
+    pub show_help: bool,
+    pub help_scroll: usize,
     pub should_quit: bool,
 }
 
@@ -339,6 +345,8 @@ impl App {
             history_index: None,
             saved_draft: String::new(),
             tab_state: None,
+            show_help: false,
+            help_scroll: 0,
             should_quit: false,
         }
     }
@@ -444,6 +452,11 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
+        if self.show_help {
+            self.handle_help_key_event(key);
+            return;
+        }
+
         if key.code != KeyCode::Tab {
             self.tab_state = None;
         }
@@ -565,6 +578,50 @@ impl App {
             KeyCode::Char(ch) => {
                 self.input.insert(self.cursor_pos, ch);
                 self.cursor_pos += ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_help_key_event(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl {
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('q') => {
+                    self.quit_all(None);
+                }
+                KeyCode::Char('u') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(8);
+                }
+                KeyCode::Char('d') => {
+                    self.help_scroll = self.help_scroll.saturating_add(8);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.show_help = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                self.help_scroll = self.help_scroll.saturating_sub(8);
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                self.help_scroll = self.help_scroll.saturating_add(8);
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.help_scroll = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.help_scroll = 1000;
             }
             _ => {}
         }
@@ -711,6 +768,10 @@ impl App {
         let active_nick = self.active_nick().to_string();
 
         match cmd {
+            UserCommand::Help => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             UserCommand::Join(channel) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     let _ = sender.send_join(&channel);
@@ -1169,6 +1230,7 @@ mod tests {
 
     #[test]
     fn parses_slash_commands_and_plain_text() {
+        assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
         assert_eq!(
             parse_user_command("/join #rust"),
             Some(UserCommand::Join("#rust".to_string()))
@@ -1341,5 +1403,29 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
         assert_eq!(app.active_buffer, linux_idx);
         assert!(!app.buffers[linux_idx].unread);
+    }
+
+    #[test]
+    fn help_command_opens_scrolls_and_closes_popup() {
+        let mut app = test_app();
+        assert!(!app.show_help);
+
+        app.input = "/help".into();
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, 1);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, 9);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, 8);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_help);
     }
 }
