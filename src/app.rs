@@ -11,8 +11,8 @@ use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
     "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/kick",
-    "/invite", "/mode", "/ban", "/op", "/deop", "/voice", "/devoice", "/raw", "/quote", "/clear",
-    "/close", "/quit",
+    "/invite", "/mode", "/ban", "/op", "/deop", "/voice", "/devoice", "/away", "/motd", "/list",
+    "/buffer", "/raw", "/quote", "/clear", "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +183,10 @@ pub enum UserCommand {
     Kick { nick: String, reason: Option<String> },
     Invite { nick: String, channel: Option<String> },
     Mode { target: Option<String>, args: String },
+    Away(Option<String>),
+    Motd,
+    List(Option<String>),
+    Buffer(String),
     Raw(String),
     Clear,
     Close,
@@ -385,6 +389,30 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 target: None,
                 args: format!("-v {nick}"),
             })
+        }
+        "/away" => {
+            let msg = if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            };
+            Some(UserCommand::Away(msg))
+        }
+        "/motd" => Some(UserCommand::Motd),
+        "/list" => {
+            let filter = if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            };
+            Some(UserCommand::List(filter))
+        }
+        "/buffer" | "/b" => {
+            if rest.is_empty() {
+                None
+            } else {
+                Some(UserCommand::Buffer(rest.to_string()))
+            }
         }
         "/raw" | "/quote" => {
             if rest.is_empty() {
@@ -1126,6 +1154,57 @@ impl App {
                     ),
                 );
             }
+            UserCommand::Away(reason) => {
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::AWAY(reason.clone()));
+                }
+                let text = match reason {
+                    Some(r) => format!("* Marked as away: {r}"),
+                    None => "* Cleared away status".to_string(),
+                };
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(None, text, LineKind::System),
+                );
+            }
+            UserCommand::Motd => {
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::MOTD(None));
+                }
+            }
+            UserCommand::List(filter) => {
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::LIST(filter, None));
+                }
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(None, "* Requesting channel list...", LineKind::System),
+                );
+            }
+            UserCommand::Buffer(target) => {
+                if let Ok(num) = target.parse::<usize>() {
+                    if num >= 1 && num <= self.buffers.len() {
+                        self.select_buffer(num - 1);
+                        return;
+                    }
+                }
+                if let Some(idx) = self
+                    .buffers
+                    .iter()
+                    .position(|b| b.name.eq_ignore_ascii_case(&target))
+                {
+                    self.select_buffer(idx);
+                } else {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("Buffer not found: {target}"),
+                            LineKind::Error,
+                        ),
+                    );
+                }
+            }
             UserCommand::Raw(raw_cmd) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
@@ -1555,6 +1634,42 @@ impl App {
                     );
                 }
             }
+            Response::RPL_UNAWAY | Response::RPL_NOWAWAY => {
+                let text = if args.len() > 1 {
+                    args[1..].join(" ")
+                } else {
+                    args.join(" ")
+                };
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(None, format!("* {text}"), LineKind::System),
+                );
+            }
+            Response::RPL_LIST => {
+                if args.len() >= 3 {
+                    let chan = &args[1];
+                    let count = &args[2];
+                    let topic = if args.len() >= 4 {
+                        args[3..].join(" ")
+                    } else {
+                        String::new()
+                    };
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [list] {chan} ({count}): {topic}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            Response::RPL_LISTEND => {
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(None, "* [list] End of /LIST", LineKind::System),
+                );
+            }
             Response::RPL_WELCOME
             | Response::RPL_YOURHOST
             | Response::RPL_CREATED
@@ -1638,6 +1753,15 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(
+            parse_user_command("/away lunch"),
+            Some(UserCommand::Away(Some("lunch".to_string())))
+        );
+        assert_eq!(parse_user_command("/motd"), Some(UserCommand::Motd));
+        assert_eq!(
+            parse_user_command("/buffer #rust"),
+            Some(UserCommand::Buffer("#rust".to_string()))
+        );
         assert_eq!(
             parse_user_command("/op alice"),
             Some(UserCommand::Mode {
