@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use anyhow::{bail, Context, Result};
 use irc::client::prelude::Config as IrcConfig;
@@ -26,6 +27,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub channels: Vec<String>,
     pub password: Option<String>,
+    pub password_command: Option<String>,
+    pub nick_password: Option<String>,
+    pub nick_password_command: Option<String>,
+    pub client_cert_path: Option<String>,
     pub enabled: Option<bool>,
 }
 
@@ -60,6 +65,20 @@ impl ServerConfig {
             .unwrap_or_else(|| if self.effective_tls() { 6697 } else { 6667 })
     }
 
+    pub fn resolve_password(&self) -> Result<Option<String>> {
+        if let Some(cmd) = &self.password_command {
+            return Ok(Some(run_secret_command(cmd)?));
+        }
+        Ok(self.password.clone())
+    }
+
+    pub fn resolve_nick_password(&self) -> Result<Option<String>> {
+        if let Some(cmd) = &self.nick_password_command {
+            return Ok(Some(run_secret_command(cmd)?));
+        }
+        Ok(self.nick_password.clone())
+    }
+
     pub fn to_irc_config(&self, fallback_nick: Option<&str>) -> Result<IrcConfig> {
         if self.server.trim().is_empty() {
             bail!("Server hostname cannot be empty");
@@ -67,6 +86,8 @@ impl ServerConfig {
         let nickname = self.effective_nickname(fallback_nick)?;
         let use_tls = self.effective_tls();
         let port = self.effective_port();
+        let password = self.resolve_password()?;
+        let nick_password = self.resolve_nick_password()?;
 
         Ok(IrcConfig {
             nickname: Some(nickname.clone()),
@@ -76,10 +97,43 @@ impl ServerConfig {
             port: Some(port),
             use_tls: Some(use_tls),
             channels: self.channels.clone(),
-            password: self.password.clone(),
+            password,
+            nick_password,
+            client_cert_path: self.client_cert_path.clone(),
             ..IrcConfig::default()
         })
     }
+}
+
+fn run_secret_command(cmd: &str) -> Result<String> {
+    let output = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .with_context(|| format!("Failed to execute secret command '{cmd}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Secret command '{cmd}' exited with {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let secret = String::from_utf8(output.stdout)
+        .context("Secret command output is not valid UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if secret.is_empty() {
+        bail!("Secret command '{cmd}' returned empty output");
+    }
+
+    Ok(secret)
 }
 
 impl AppConfig {
@@ -216,5 +270,26 @@ mod tests {
         assert_eq!(cfg.default_nickname.as_deref(), Some("irc_user"));
         let libera = &cfg.servers["libera"];
         assert_eq!(libera.channels, vec!["#linux", "#rust"]);
+    }
+
+    #[test]
+    fn resolves_password_command_and_cert_path() {
+        let toml = r##"
+            default_nickname = "irc_user"
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            password_command = "printf 'my_secret_pw\n'"
+            nick_password = "nickserv_pw"
+            client_cert_path = "/tmp/client.pem"
+        "##;
+
+        let cfg = AppConfig::from_toml_str(toml).expect("valid config");
+        let irc_cfg = cfg.servers["libera"]
+            .to_irc_config(cfg.default_nickname.as_deref())
+            .unwrap();
+        assert_eq!(irc_cfg.password.as_deref(), Some("my_secret_pw"));
+        assert_eq!(irc_cfg.nick_password.as_deref(), Some("nickserv_pw"));
+        assert_eq!(irc_cfg.client_cert_path.as_deref(), Some("/tmp/client.pem"));
     }
 }
