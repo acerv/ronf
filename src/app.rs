@@ -1651,6 +1651,45 @@ impl App {
             Command::Response(resp, args) => {
                 self.handle_numeric_response(server_id, resp, args);
             }
+            Command::Raw(code, args) => {
+                self.handle_raw_numeric(code.as_str(), args);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_raw_numeric(&mut self, code: &str, args: Vec<String>) {
+        match code {
+            "330" => {
+                // RPL_WHOISACCOUNT: [<me>, <nick>, <account>, "is logged in as"]
+                if args.len() >= 3 {
+                    let nick = &args[1];
+                    let account = &args[2];
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} is logged in as {account}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
+            "378" | "671" => {
+                // RPL_WHOISHOST (378) / RPL_WHOISSECURE (671): [<me>, <nick>, <info...>]
+                if args.len() >= 3 {
+                    let nick = &args[1];
+                    let info = args[2..].join(" ");
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [whois] {nick} {info}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -2334,5 +2373,52 @@ mod tests {
         );
 
         assert_eq!(app.nicks.get("libera").map(String::as_str), Some("irc_user_"));
+    }
+
+    #[test]
+    fn handles_whois_account_host_and_tls_numerics() {
+        let mut app = test_app();
+        let active = app.active_buffer;
+        let before = app.buffers[active].messages.len();
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Raw(
+                    "330".into(),
+                    vec![
+                        "irc_user".into(),
+                        "alice".into(),
+                        "alice_acct".into(),
+                        "is logged in as".into(),
+                    ],
+                ),
+            },
+        );
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Raw(
+                    "671".into(),
+                    vec![
+                        "irc_user".into(),
+                        "alice".into(),
+                        "is using a secure connection".into(),
+                    ],
+                ),
+            },
+        );
+
+        assert_eq!(app.buffers[active].messages.len(), before + 2);
+        assert!(app.buffers[active].messages[before]
+            .content
+            .contains("is logged in as alice_acct"));
+        assert!(app.buffers[active].messages[before + 1]
+            .content
+            .contains("is using a secure connection"));
     }
 }
