@@ -34,6 +34,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/reconnect",
     "/ignore",
     "/unignore",
+    "/search",
     "/raw",
     "/quote",
     "/clear",
@@ -286,6 +287,7 @@ pub enum UserCommand {
     Reconnect,
     Ignore(Option<String>),
     Unignore(String),
+    Search(String),
     Raw(String),
     Clear,
     Close,
@@ -521,6 +523,13 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
         "/unignore" => {
             let nick = rest.split_whitespace().next()?;
             Some(UserCommand::Unignore(nick.to_string()))
+        }
+        "/search" => {
+            if rest.is_empty() {
+                None
+            } else {
+                Some(UserCommand::Search(rest.to_string()))
+            }
         }
         "/raw" | "/quote" => {
             if rest.is_empty() {
@@ -1357,6 +1366,43 @@ impl App {
                     self.active_buffer,
                     ChatLine::new(None, format!("* Unignored {nick}"), LineKind::System),
                 );
+            }
+            UserCommand::Search(query) => {
+                let q_lower = query.to_ascii_lowercase();
+                let matches: Vec<String> = self
+                    .active_buf()
+                    .messages
+                    .iter()
+                    .filter(|m| !m.content.starts_with("* [search]"))
+                    .filter(|m| {
+                        m.content.to_ascii_lowercase().contains(&q_lower)
+                            || m.sender
+                                .as_deref()
+                                .is_some_and(|s| s.to_ascii_lowercase().contains(&q_lower))
+                    })
+                    .map(|m| match &m.sender {
+                        Some(s) => format!("* [search] [{}] <{s}> {}", m.timestamp, m.content),
+                        None => format!("* [search] [{}] {}", m.timestamp, m.content),
+                    })
+                    .collect();
+
+                if matches.is_empty() {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            format!("* [search] No matches for '{query}'"),
+                            LineKind::System,
+                        ),
+                    );
+                } else {
+                    for line in matches {
+                        self.push_to_buffer(
+                            self.active_buffer,
+                            ChatLine::new(None, line, LineKind::System),
+                        );
+                    }
+                }
             }
             UserCommand::Raw(raw_cmd) => {
                 if let Some(sender) = self.senders.get(&server_id) {
@@ -2495,5 +2541,26 @@ mod tests {
             },
         );
         assert_eq!(app.buffers[rust_idx].messages.len(), 1);
+    }
+
+    #[test]
+    fn search_command_finds_matching_messages() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "borrow checker is great".into()),
+            },
+        );
+        app.execute_user_command(UserCommand::Search("borrow".into()));
+        assert_eq!(app.buffers[rust_idx].messages.len(), 2);
+        assert!(app.buffers[rust_idx].messages[1]
+            .content
+            .contains("* [search]"));
     }
 }

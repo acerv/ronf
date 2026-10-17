@@ -455,6 +455,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("/reconnect", "Reconnect active server"),
                 ("/ignore [nick]", "Ignore user or list ignored"),
                 ("/unignore <nick>", "Stop ignoring user"),
+                ("/search <query>", "Search active buffer messages"),
                 ("/raw <irc_line>", "Send raw IRC protocol line"),
                 ("/clear", "Clear active buffer history"),
                 ("/close", "Close active channel or DM"),
