@@ -11,7 +11,8 @@ use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
     "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/kick",
-    "/invite", "/raw", "/quote", "/clear", "/close", "/quit",
+    "/invite", "/mode", "/ban", "/op", "/deop", "/voice", "/devoice", "/raw", "/quote", "/clear",
+    "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +182,7 @@ pub enum UserCommand {
     Whois(String),
     Kick { nick: String, reason: Option<String> },
     Invite { nick: String, channel: Option<String> },
+    Mode { target: Option<String>, args: String },
     Raw(String),
     Clear,
     Close,
@@ -328,6 +330,61 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                     channel: None,
                 })
             }
+        }
+        "/mode" => {
+            if rest.is_empty() {
+                None
+            } else {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let first = parts.next().unwrap();
+                let rem = parts.next().map(str::trim).unwrap_or("");
+                if first.starts_with('#') || first.starts_with('&') {
+                    Some(UserCommand::Mode {
+                        target: Some(first.to_string()),
+                        args: rem.to_string(),
+                    })
+                } else {
+                    Some(UserCommand::Mode {
+                        target: None,
+                        args: rest.to_string(),
+                    })
+                }
+            }
+        }
+        "/ban" => {
+            let mask = rest.split_whitespace().next()?;
+            Some(UserCommand::Mode {
+                target: None,
+                args: format!("+b {mask}"),
+            })
+        }
+        "/op" => {
+            let nick = rest.split_whitespace().next()?;
+            Some(UserCommand::Mode {
+                target: None,
+                args: format!("+o {nick}"),
+            })
+        }
+        "/deop" => {
+            let nick = rest.split_whitespace().next()?;
+            Some(UserCommand::Mode {
+                target: None,
+                args: format!("-o {nick}"),
+            })
+        }
+        "/voice" => {
+            let nick = rest.split_whitespace().next()?;
+            Some(UserCommand::Mode {
+                target: None,
+                args: format!("+v {nick}"),
+            })
+        }
+        "/devoice" => {
+            let nick = rest.split_whitespace().next()?;
+            Some(UserCommand::Mode {
+                target: None,
+                args: format!("-v {nick}"),
+            })
         }
         "/raw" | "/quote" => {
             if rest.is_empty() {
@@ -1047,6 +1104,28 @@ impl App {
                     ),
                 );
             }
+            UserCommand::Mode { target, args } => {
+                let target_name = match target {
+                    Some(t) => t,
+                    None if self.active_buf().kind == BufferKind::Channel => {
+                        self.active_buf().name.clone()
+                    }
+                    None => active_nick,
+                };
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let mut raw_args = vec![target_name.clone()];
+                    raw_args.extend(args.split_whitespace().map(str::to_string));
+                    let _ = sender.send(Command::Raw("MODE".to_string(), raw_args));
+                }
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(
+                        None,
+                        format!("* Mode {target_name} {args}").trim_end().to_string(),
+                        LineKind::System,
+                    ),
+                );
+            }
             UserCommand::Raw(raw_cmd) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
@@ -1559,6 +1638,20 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(
+            parse_user_command("/op alice"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: "+o alice".to_string()
+            })
+        );
+        assert_eq!(
+            parse_user_command("/ban *!*@bad.host"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: "+b *!*@bad.host".to_string()
+            })
+        );
         assert_eq!(
             parse_user_command("/kick bob spamming"),
             Some(UserCommand::Kick {
