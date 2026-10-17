@@ -386,6 +386,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("/msg <to> <text>", "Send private or channel message"),
                 ("/nick <newnick>", "Change nick on active server"),
                 ("/me <action>", "Send CTCP action message"),
+                ("/topic [text]", "View or set channel topic"),
                 ("/close", "Close active channel or DM"),
                 ("/quit [reason]", "Disconnect all and exit"),
             ],

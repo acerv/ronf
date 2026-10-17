@@ -10,7 +10,7 @@ use irc::proto::{Command, Message, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/nick", "/me", "/close", "/quit",
+    "/help", "/join", "/part", "/msg", "/nick", "/me", "/topic", "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +175,7 @@ pub enum UserCommand {
     Msg { target: String, text: String },
     Nick(String),
     Me(String),
+    Topic(Option<String>),
     Close,
     Quit(Option<String>),
     Say(String),
@@ -244,6 +245,14 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             } else {
                 Some(UserCommand::Me(rest.to_string()))
             }
+        }
+        "/topic" => {
+            let new_topic = if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            };
+            Some(UserCommand::Topic(new_topic))
         }
         "/close" => Some(UserCommand::Close),
         "/quit" | "/exit" => {
@@ -853,6 +862,35 @@ impl App {
                     ChatLine::new(Some(active_nick), action, LineKind::Action),
                 );
             }
+            UserCommand::Topic(new_topic) => {
+                if self.active_buf().kind != BufferKind::Channel {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            "Cannot use /topic outside a channel buffer",
+                            LineKind::Error,
+                        ),
+                    );
+                    return;
+                }
+                let chan = self.active_buf().name.clone();
+                if new_topic.is_none() {
+                    if let Some(existing) = self.active_buf().topic.clone() {
+                        self.push_to_buffer(
+                            self.active_buffer,
+                            ChatLine::new(
+                                None,
+                                format!("* Topic for {chan}: {existing}"),
+                                LineKind::System,
+                            ),
+                        );
+                    }
+                }
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::TOPIC(chan, new_topic));
+                }
+            }
             UserCommand::Close => {
                 if self.active_buf().kind == BufferKind::Server {
                     self.push_to_buffer(
@@ -1106,6 +1144,21 @@ impl App {
 
     fn handle_numeric_response(&mut self, server_id: &str, resp: Response, args: Vec<String>) {
         match resp {
+            Response::RPL_NOTOPIC => {
+                if args.len() >= 2 {
+                    let chan = &args[1];
+                    let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
+                    self.buffers[idx].topic = None;
+                    self.push_to_buffer(
+                        idx,
+                        ChatLine::new(
+                            None,
+                            format!("* No topic is set for {chan}"),
+                            LineKind::System,
+                        ),
+                    );
+                }
+            }
             Response::RPL_TOPIC => {
                 if args.len() >= 3 {
                     let chan = &args[1];
@@ -1231,6 +1284,11 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(parse_user_command("/topic"), Some(UserCommand::Topic(None)));
+        assert_eq!(
+            parse_user_command("/topic Rust 2024 edition"),
+            Some(UserCommand::Topic(Some("Rust 2024 edition".to_string())))
+        );
         assert_eq!(
             parse_user_command("/join #rust"),
             Some(UserCommand::Join("#rust".to_string()))
