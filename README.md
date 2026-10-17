@@ -75,8 +75,23 @@ channels = [
 - `/join <#channel>`: Join channel on active server
 - `/part [reason]`: Leave current channel
 - `/msg <target> <text>`: Send private message or message channel
+- `/query <nick> [text]`: Open direct message buffer with `<nick>`
 - `/nick <newnick>`: Change nickname on active server
 - `/me <action>`: Send CTCP action message
+- `/topic [text]`: View or set channel topic
+- `/whois <nick>`: Query user information via WHOIS
+- `/kick <nick> [reason]`: Kick user from active channel
+- `/invite <nick> [#chan]`: Invite user to channel
+- `/mode [target] <modes>`: Set channel or user modes
+- `/op` / `/deop <nick>`: Grant or revoke channel operator (`@`)
+- `/voice` / `/devoice <nick>`: Grant or revoke channel voice (`+`)
+- `/ban <mask>`: Ban hostmask on active channel (`+b`)
+- `/away [reason]`: Set or clear away status
+- `/list [filter]`: List channels on active server
+- `/motd`: Request server Message of the Day
+- `/buffer <target>`: Switch buffer by name or number
+- `/raw <irc_line>`: Send raw IRC protocol command
+- `/clear`: Clear active buffer message history
 - `/close`: Close current channel or direct message buffer
 - `/quit [reason]`: Disconnect from all servers and exit
 
