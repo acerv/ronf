@@ -136,7 +136,7 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│ ", Style::default().fg(Color::Gray)),
     ];
 
     match (&buf.kind, &buf.topic) {
@@ -159,7 +159,7 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
             ));
             spans.push(Span::styled(
                 format!(" — {topic}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Gray),
             ));
         }
         (BufferKind::Channel, _) => {
@@ -218,7 +218,7 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::Gray)
                 };
                 let name_style = if active {
                     Style::default()
@@ -274,7 +274,7 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
 fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
     let mut spans = vec![Span::styled(
         format!("[{}] ", line.timestamp),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::Gray),
     )];
 
     match line.kind {
@@ -285,12 +285,12 @@ fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
                 } else {
                     nick_color(sender)
                 };
-                spans.push(Span::styled("<", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled("<", Style::default().fg(Color::Gray)));
                 spans.push(Span::styled(
                     sender.clone(),
                     Style::default().fg(n_color).add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled("> ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled("> ", Style::default().fg(Color::Gray)));
             }
             spans.extend(parse_irc_spans(
                 &line.content,
@@ -492,7 +492,7 @@ pub fn build_help_lines() -> (Vec<Line<'static>>, u16) {
         )));
         lines.push(Line::from(Span::styled(
             "─".repeat(max_w),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         )));
 
         for (key, desc) in entries {
@@ -662,7 +662,7 @@ fn mirc_color_to_ratatui(code: u8) -> Option<Color> {
         11 => Some(Color::LightCyan),
         12 => Some(Color::LightBlue),
         13 => Some(Color::LightMagenta),
-        14 => Some(Color::DarkGray),
+        14 => Some(Color::Gray),
         15 => Some(Color::Gray),
         _ => None,
     }
