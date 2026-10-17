@@ -10,8 +10,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/close",
-    "/quit",
+    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/clear",
+    "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +179,7 @@ pub enum UserCommand {
     Me(String),
     Topic(Option<String>),
     Whois(String),
+    Clear,
     Close,
     Quit(Option<String>),
     Say(String),
@@ -285,6 +286,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 Some(UserCommand::Whois(target.to_string()))
             }
         }
+        "/clear" => Some(UserCommand::Clear),
         "/close" => Some(UserCommand::Close),
         "/quit" | "/exit" => {
             let reason = if rest.is_empty() {
@@ -948,6 +950,11 @@ impl App {
                     ),
                 );
             }
+            UserCommand::Clear => {
+                let buf = self.active_buf_mut();
+                buf.messages.clear();
+                buf.scroll_offset = 0;
+            }
             UserCommand::Close => {
                 if self.active_buf().kind == BufferKind::Server {
                     self.push_to_buffer(
@@ -1427,6 +1434,7 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(parse_user_command("/clear"), Some(UserCommand::Clear));
         assert_eq!(
             parse_user_command("/whois alice"),
             Some(UserCommand::Whois("alice".to_string()))
