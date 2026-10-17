@@ -10,8 +10,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 use crate::config::AppConfig;
 
 pub const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/raw",
-    "/quote", "/clear", "/close", "/quit",
+    "/help", "/join", "/part", "/msg", "/query", "/nick", "/me", "/topic", "/whois", "/kick",
+    "/invite", "/raw", "/quote", "/clear", "/close", "/quit",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +179,8 @@ pub enum UserCommand {
     Me(String),
     Topic(Option<String>),
     Whois(String),
+    Kick { nick: String, reason: Option<String> },
+    Invite { nick: String, channel: Option<String> },
     Raw(String),
     Clear,
     Close,
@@ -285,6 +287,46 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 None
             } else {
                 Some(UserCommand::Whois(target.to_string()))
+            }
+        }
+        "/kick" => {
+            if rest.is_empty() {
+                None
+            } else if let Some((nick, reason)) = rest.split_once(char::is_whitespace) {
+                let reason = reason.trim();
+                Some(UserCommand::Kick {
+                    nick: nick.to_string(),
+                    reason: if reason.is_empty() {
+                        None
+                    } else {
+                        Some(reason.to_string())
+                    },
+                })
+            } else {
+                Some(UserCommand::Kick {
+                    nick: rest.to_string(),
+                    reason: None,
+                })
+            }
+        }
+        "/invite" => {
+            if rest.is_empty() {
+                None
+            } else if let Some((nick, chan)) = rest.split_once(char::is_whitespace) {
+                let chan = chan.trim();
+                Some(UserCommand::Invite {
+                    nick: nick.to_string(),
+                    channel: if chan.is_empty() {
+                        None
+                    } else {
+                        Some(chan.to_string())
+                    },
+                })
+            } else {
+                Some(UserCommand::Invite {
+                    nick: rest.to_string(),
+                    channel: None,
+                })
             }
         }
         "/raw" | "/quote" => {
@@ -958,6 +1000,53 @@ impl App {
                     ),
                 );
             }
+            UserCommand::Kick { nick, reason } => {
+                if self.active_buf().kind != BufferKind::Channel {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            "Cannot /kick outside a channel buffer",
+                            LineKind::Error,
+                        ),
+                    );
+                    return;
+                }
+                let chan = self.active_buf().name.clone();
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::KICK(chan, nick, reason));
+                }
+            }
+            UserCommand::Invite { nick, channel } => {
+                let target_chan = match channel {
+                    Some(c) => c,
+                    None if self.active_buf().kind == BufferKind::Channel => {
+                        self.active_buf().name.clone()
+                    }
+                    None => {
+                        self.push_to_buffer(
+                            self.active_buffer,
+                            ChatLine::new(
+                                None,
+                                "Specify a channel: /invite <nick> <#channel>",
+                                LineKind::Error,
+                            ),
+                        );
+                        return;
+                    }
+                };
+                if let Some(sender) = self.senders.get(&server_id) {
+                    let _ = sender.send(Command::INVITE(nick.clone(), target_chan.clone()));
+                }
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(
+                        None,
+                        format!("* Invited {nick} to {target_chan}"),
+                        LineKind::System,
+                    ),
+                );
+            }
             UserCommand::Raw(raw_cmd) => {
                 if let Some(sender) = self.senders.get(&server_id) {
                     if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
@@ -1224,6 +1313,17 @@ impl App {
                     );
                 }
             }
+            Command::INVITE(invited, chan) => {
+                let by = sender_nick.unwrap_or_else(|| "someone".to_string());
+                self.push_to_buffer(
+                    self.active_buffer,
+                    ChatLine::new(
+                        None,
+                        format!("* {by} invited {invited} to {chan}"),
+                        LineKind::System,
+                    ),
+                );
+            }
             Command::Response(resp, args) => {
                 self.handle_numeric_response(server_id, resp, args);
             }
@@ -1459,6 +1559,20 @@ mod tests {
     #[test]
     fn parses_slash_commands_and_plain_text() {
         assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
+        assert_eq!(
+            parse_user_command("/kick bob spamming"),
+            Some(UserCommand::Kick {
+                nick: "bob".to_string(),
+                reason: Some("spamming".to_string())
+            })
+        );
+        assert_eq!(
+            parse_user_command("/invite alice #rust"),
+            Some(UserCommand::Invite {
+                nick: "alice".to_string(),
+                channel: Some("#rust".to_string())
+            })
+        );
         assert_eq!(
             parse_user_command("/raw PRIVMSG NickServ :IDENTIFY pass"),
             Some(UserCommand::Raw("PRIVMSG NickServ :IDENTIFY pass".to_string()))
