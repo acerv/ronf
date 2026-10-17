@@ -400,124 +400,146 @@ fn draw_users_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(list, area);
 }
 
-pub fn build_help_lines() -> Vec<Line<'static>> {
-    let section_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let key_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let desc_style = Style::default().fg(Color::White);
-
-    let entry = |key: &'static str, desc: &'static str| -> Line<'static> {
-        Line::from(vec![
-            Span::styled(format!("  {key:<24}"), key_style),
-            Span::styled(desc, desc_style),
-        ])
-    };
-
+pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     vec![
-        Line::from(Span::styled(
-            " Tree & Buffer Navigation",
-            section_style,
-        )),
-        entry("Ctrl+N / Alt+Down", "Select next buffer in tree"),
-        entry("Ctrl+P / Alt+Up", "Select previous buffer in tree"),
-        entry("Alt+A", "Jump to next unread buffer (*)"),
-        entry("Alt+1 .. Alt+9", "Jump directly to buffer 1..9"),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Scrolling (Chat & Users List)",
-            section_style,
-        )),
-        entry("PageUp / PageDown", "Scroll chat history up / down"),
-        entry("Alt+PageUp / Alt+PageDown", "Scroll right-hand Users list up / down"),
-        entry("Esc", "Snap chat scrollback to latest messages"),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Input Editing & Completion (Readline)",
-            section_style,
-        )),
-        entry("Tab", "Complete nick or /command (cycle matches)"),
-        entry("Up / Down", "Cycle through sent message history"),
-        entry("Left / Right", "Move cursor one character"),
-        entry("Home (Ctrl+A)", "Move cursor to start of input line"),
-        entry("End (Ctrl+E)", "Move cursor to end of input line"),
-        entry("Backspace / Delete", "Delete character before / at cursor"),
-        entry("Ctrl+W", "Delete word before cursor"),
-        entry("Ctrl+U", "Clear entire input line"),
-        entry("Enter", "Send message or execute /command"),
-        Line::from(""),
-        Line::from(Span::styled(" Slash Commands", section_style)),
-        entry("/help", "Open this scrollable help dialog"),
-        entry("/join <#channel>", "Join channel on active server"),
-        entry("/part [reason]", "Leave current channel"),
-        entry("/msg <target> <text>", "Send private or channel message"),
-        entry("/nick <newnick>", "Change nickname on active server"),
-        entry("/me <action>", "Send CTCP action to active buffer"),
-        entry("/close", "Close active channel or DM buffer"),
-        entry("/quit [reason]", "Disconnect from all servers and exit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Application & Help Dialog Controls",
-            section_style,
-        )),
-        entry("Up / Down / j / k", "Scroll help dialog one line"),
-        entry("PgUp / PgDn / Ctrl+U/D", "Scroll help dialog by page"),
-        entry("Home (g) / End (G)", "Jump to top / bottom of help dialog"),
-        entry("Esc / q / Enter", "Close help dialog"),
-        entry("Ctrl+C / Ctrl+Q", "Quit ronf"),
+        (
+            "Tree & Buffer Navigation",
+            vec![
+                ("Ctrl+n / Alt+Down", "Next buffer in tree"),
+                ("Ctrl+p / Alt+Up", "Previous buffer in tree"),
+                ("Alt+a", "Jump to next unread buffer"),
+                ("Alt+1 .. Alt+9", "Jump to buffer 1..9"),
+            ],
+        ),
+        (
+            "Scrolling (Chat & Users)",
+            vec![
+                ("PgUp / PgDn", "Scroll chat history up / down"),
+                ("Alt+PgUp / PgDn", "Scroll Users list up / down"),
+                ("Esc", "Snap chat scrollback to bottom"),
+            ],
+        ),
+        (
+            "Input & Completion",
+            vec![
+                ("Tab", "Complete nick or /command"),
+                ("Up / Down", "Previous / next sent message"),
+                ("Left / Right", "Move cursor one character"),
+                ("Home / Ctrl+a", "Move cursor to start of line"),
+                ("End / Ctrl+e", "Move cursor to end of line"),
+                ("Ctrl+w", "Delete word before cursor"),
+                ("Ctrl+u", "Clear entire input line"),
+                ("Enter", "Send message or /command"),
+            ],
+        ),
+        (
+            "Slash Commands",
+            vec![
+                ("/help", "Open this help dialog"),
+                ("/join <#chan>", "Join channel on active server"),
+                ("/part [reason]", "Leave current channel"),
+                ("/msg <to> <text>", "Send private or channel message"),
+                ("/nick <newnick>", "Change nick on active server"),
+                ("/me <action>", "Send CTCP action message"),
+                ("/close", "Close active channel or DM"),
+                ("/quit [reason]", "Disconnect all and exit"),
+            ],
+        ),
+        (
+            "Help Dialog & App",
+            vec![
+                ("j / k / Up / Down", "Scroll help one line"),
+                ("PgUp / PgDn", "Scroll help one page"),
+                ("g / G", "Top / bottom of help"),
+                ("Esc / q / Enter", "Close help dialog"),
+                ("Ctrl+c / Ctrl+q", "Quit ronf"),
+            ],
+        ),
     ]
 }
 
-fn draw_help_popup(f: &mut Frame, app: &App) {
-    let area = centered_rect(72, 80, f.area());
-    f.render_widget(Clear, area);
+pub fn build_help_lines() -> (Vec<Line<'static>>, u16) {
+    let sections = help_sections();
+    let key_col = sections
+        .iter()
+        .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.chars().count()))
+        .max()
+        .unwrap_or(16)
+        + 3;
 
-    let lines = build_help_lines();
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let max_scroll = lines.len().saturating_sub(inner_height);
-    let scroll = app.help_scroll.min(max_scroll) as u16;
+    let mut max_w = 0usize;
+    for (header, entries) in &sections {
+        max_w = max_w.max(header.chars().count());
+        for (_, desc) in entries {
+            max_w = max_w.max(key_col + desc.chars().count());
+        }
+    }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            " Help — Keybindings & Commands ",
+    let mut lines = Vec::new();
+    for (i, (header, entries)) in sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+
+        lines.push(Line::from(Span::styled(
+            (*header).to_string(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " [↑/↓/j/k/PgUp/PgDn: Scroll | Esc/q/Enter: Close] ",
+        )));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(max_w),
             Style::default().fg(Color::DarkGray),
-        ));
+        )));
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((scroll, 0));
+        for (key, desc) in entries {
+            let key_span = Span::styled(
+                format!("{:<key_col$}", key),
+                Style::default().fg(Color::Cyan),
+            );
+            let desc_span = Span::raw((*desc).to_string());
+            lines.push(Line::from(vec![key_span, desc_span]));
+        }
+    }
 
-    f.render_widget(paragraph, area);
+    (lines, max_w as u16)
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
+fn draw_help_popup(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let (lines, content_width) = build_help_lines();
+    let total_lines = lines.len() as u16;
 
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+    let title = " Help — q/Esc to close, j/k to scroll ";
+    let title_len = title.chars().count() as u16;
+    let popup_w = (content_width + 4).max(title_len + 2).min(area.width);
+    let popup_h = (total_lines + 2).min(area.height.saturating_sub(2).max(6));
+
+    let x = area.width.saturating_sub(popup_w) / 2;
+    let y = area.height.saturating_sub(popup_h) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let padded = Rect::new(
+        inner.x + 1,
+        inner.y,
+        inner.width.saturating_sub(2),
+        inner.height,
+    );
+
+    let max_scroll = (lines.len() as usize).saturating_sub(padded.height as usize);
+    let scroll = app.help_scroll.min(max_scroll) as u16;
+
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+    f.render_widget(paragraph, padded);
 }
 
 /// Parses mIRC formatting codes (`\x02` bold, `\x1d` italic, `\x1f` underline,
@@ -734,8 +756,9 @@ mod tests {
     }
 
     #[test]
-    fn help_lines_contain_organized_sections() {
-        let lines = build_help_lines();
+    fn help_lines_contain_organized_sections_and_aligned_columns() {
+        let (lines, width) = build_help_lines();
+        assert!(width > 30 && width < 60);
         let combined: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -743,9 +766,16 @@ mod tests {
             .join("\n");
 
         assert!(combined.contains("Tree & Buffer Navigation"));
-        assert!(combined.contains("Scrolling (Chat & Users List)"));
-        assert!(combined.contains("Input Editing & Completion (Readline)"));
+        assert!(combined.contains("Scrolling (Chat & Users)"));
+        assert!(combined.contains("Input & Completion"));
         assert!(combined.contains("Slash Commands"));
         assert!(combined.contains("/help"));
+
+        // Verify every key span has trailing spaces (no overlap with description)
+        for line in &lines {
+            if line.spans.len() == 2 {
+                assert!(line.spans[0].content.ends_with("   ") || line.spans[0].content.ends_with("  "));
+            }
+        }
     }
 }
