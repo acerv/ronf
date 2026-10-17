@@ -92,8 +92,6 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(1),
         ])
         .split(area);
 
@@ -109,12 +107,20 @@ pub fn draw(f: &mut Frame, app: &App) {
         ])
         .split(v_chunks[2]);
 
-    draw_tree_sidebar(f, app, columns[0]);
-    draw_chat_pane(f, app, columns[1]);
-    draw_users_sidebar(f, app, columns[2]);
+    let center_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(columns[1]);
 
-    f.render_widget(Block::default().borders(Borders::TOP), v_chunks[3]);
-    draw_input_bar(f, app, v_chunks[4]);
+    draw_tree_sidebar(f, app, columns[0]);
+    draw_chat_pane(f, app, center_chunks[0]);
+    f.render_widget(Block::default().borders(Borders::TOP), center_chunks[1]);
+    draw_input_bar(f, app, center_chunks[2]);
+    draw_users_sidebar(f, app, columns[2]);
 
     if app.show_help {
         draw_help_popup(f, app);
