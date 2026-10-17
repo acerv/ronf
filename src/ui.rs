@@ -70,16 +70,7 @@ pub fn build_tree_rows(app: &App) -> Vec<TreeRow> {
                 unread,
             });
         } else {
-            let is_last_for_server = (i + 1 >= len)
-                || !app.buffers[i + 1]
-                    .server_id
-                    .eq_ignore_ascii_case(&buf.server_id)
-                || app.buffers[i + 1].kind == BufferKind::Server;
-            let connector = if is_last_for_server {
-                " └─ "
-            } else {
-                " ├─ "
-            };
+            let connector = "  └ ";
             rows.push(TreeRow::Child {
                 buffer_idx: i,
                 connector,
@@ -94,6 +85,21 @@ pub fn build_tree_rows(app: &App) -> Vec<TreeRow> {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    draw_top_bar(f, app, v_chunks[0]);
+    f.render_widget(Block::default().borders(Borders::TOP), v_chunks[1]);
+
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -101,24 +107,67 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Min(1),
             Constraint::Length(20),
         ])
-        .split(f.area());
-
-    let center_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
-        .split(columns[1]);
+        .split(v_chunks[2]);
 
     draw_tree_sidebar(f, app, columns[0]);
-    draw_chat_pane(f, app, center_chunks[0]);
-    draw_input_box(f, app, center_chunks[1]);
+    draw_chat_pane(f, app, columns[1]);
     draw_users_sidebar(f, app, columns[2]);
+
+    f.render_widget(Block::default().borders(Borders::TOP), v_chunks[3]);
+    draw_input_bar(f, app, v_chunks[4]);
 
     if app.show_help {
         draw_help_popup(f, app);
     }
 }
 
-fn draw_tree_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
+    let buf = app.active_buf();
+    let mut spans = vec![
+        Span::styled(
+            " ronf ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+    ];
+
+    match (&buf.kind, &buf.topic) {
+        (BufferKind::Server, _) => {
+            spans.push(Span::styled(
+                format!("{} (server)", buf.server_id),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+        (BufferKind::DirectMessage, _) => {
+            spans.push(Span::styled(
+                format!("{} / {}", buf.server_id, buf.name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+        (BufferKind::Channel, Some(topic)) if !topic.is_empty() => {
+            spans.push(Span::styled(
+                format!("{} / {}", buf.server_id, buf.name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" — {topic}"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        (BufferKind::Channel, _) => {
+            spans.push(Span::styled(
+                format!("{} / {}", buf.server_id, buf.name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let tree_rows = build_tree_rows(app);
     let mut items = Vec::with_capacity(tree_rows.len());
 
@@ -133,33 +182,22 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 unread,
                 ..
             } => {
-                let mut spans = Vec::new();
+                let prefix = if active { "> " } else { "  " };
                 let style = if active {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                };
-                spans.push(Span::styled(format!(" {name}"), style));
-                if active {
-                    spans.push(Span::styled(
-                        " ◂",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ));
                 } else if unread {
-                    spans.push(Span::styled(
-                        " *",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                items.push(ListItem::new(Line::from(spans)));
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("{prefix}{name}"),
+                    style,
+                ))));
             }
             TreeRow::Child {
                 connector,
@@ -168,80 +206,49 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 unread,
                 ..
             } => {
-                let mut spans = vec![Span::styled(
-                    connector,
-                    Style::default().fg(Color::DarkGray),
-                )];
+                let prefix = if active { "> " } else { "  " };
+                let conn_style = if active {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 let name_style = if active {
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else if unread {
                     Style::default()
-                        .fg(Color::White)
+                        .fg(Color::Green)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default()
                 };
-                spans.push(Span::styled(name, name_style));
-                if active {
-                    spans.push(Span::styled(
-                        " ◂",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                } else if unread {
-                    spans.push(Span::styled(
-                        " *",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                items.push(ListItem::new(Line::from(spans)));
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("{prefix}{connector}"), conn_style),
+                    Span::styled(name, name_style),
+                ])));
             }
         }
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
-        .title(Span::styled(
-            " Servers & Channels ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let list = List::new(items).block(block);
+    let list = List::new(items).block(Block::default().borders(Borders::RIGHT));
     f.render_widget(list, area);
 }
 
-fn draw_chat_pane(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     let buf = app.active_buf();
     let my_nick = app.active_nick();
 
-    let title = match (&buf.kind, &buf.topic) {
-        (BufferKind::Server, _) => format!(" {} (Server) ", buf.server_id),
-        (BufferKind::DirectMessage, _) => format!(" {} / DM: {} ", buf.server_id, buf.name),
-        (BufferKind::Channel, Some(topic)) if !topic.is_empty() => {
-            format!(" {} / {} — {} ", buf.server_id, buf.name, topic)
-        }
-        (BufferKind::Channel, _) => format!(" {} / {} ", buf.server_id, buf.name),
-    };
+    let padded = Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    );
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let inner_height = area.height.saturating_sub(2) as usize;
+    let inner_height = padded.height as usize;
     let total_msgs = buf.messages.len();
     let end = total_msgs.saturating_sub(buf.scroll_offset);
     let start = end.saturating_sub(inner_height);
@@ -252,10 +259,10 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
 
     let paragraph = Paragraph::new(visible_lines)
-        .block(block)
+        .block(Block::default().borders(Borders::NONE))
         .wrap(Wrap { trim: false });
 
-    f.render_widget(paragraph, area);
+    f.render_widget(paragraph, padded);
 }
 
 fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
@@ -313,90 +320,80 @@ fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-fn draw_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
     let buf = app.active_buf();
     let nick = app.active_nick();
-    let prompt_title = format!(" [{nick} @ {}/{}] ", buf.server_id, buf.name);
+    let prompt = format!(" [{nick} @ {}/{}] > ", buf.server_id, buf.name);
+    let prompt_width = prompt.chars().count();
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
-        .title(Span::styled(
-            prompt_title,
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let inner_width = area.width.saturating_sub(2) as usize;
+    let avail_width = (area.width as usize).saturating_sub(prompt_width);
     let cursor_chars = app.input[..app.cursor_pos].chars().count();
-    let horizontal_scroll = if inner_width > 0 && cursor_chars >= inner_width {
-        cursor_chars - inner_width + 1
+    let horizontal_scroll = if avail_width > 0 && cursor_chars >= avail_width {
+        cursor_chars - avail_width + 1
     } else {
         0
     };
 
     let visible_input: String = app.input.chars().skip(horizontal_scroll).collect();
-    let paragraph = Paragraph::new(visible_input).block(block);
-    f.render_widget(paragraph, area);
+    let line = Line::from(vec![
+        Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(visible_input),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 
     if !app.show_help {
         let cursor_x = area
             .x
-            .saturating_add(1)
+            .saturating_add(prompt_width as u16)
             .saturating_add((cursor_chars - horizontal_scroll) as u16)
-            .min(area.right().saturating_sub(2));
-        let cursor_y = area.y.saturating_add(1);
-        f.set_cursor_position(Position::new(cursor_x, cursor_y));
+            .min(area.right().saturating_sub(1));
+        f.set_cursor_position(Position::new(cursor_x, area.y));
     }
 }
 
-fn draw_users_sidebar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_users_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let buf = app.active_buf();
     let count = buf.users.len();
-    let title = format!(" Users ({count}) ");
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let mut items: Vec<ListItem> = Vec::with_capacity(count + 2);
+    items.push(ListItem::new(Line::from(Span::styled(
+        format!(" Users ({count})"),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))));
 
-    let items: Vec<ListItem> = buf
-        .users
-        .iter()
-        .skip(buf.user_scroll_offset)
-        .map(|entry| {
-            let (prefix, raw_nick) = strip_user_prefix(entry);
-            let (prefix_str, prefix_style) = match prefix {
-                Some(p @ ('~' | '&' | '@')) => (
-                    format!("{p}"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Some(p @ ('%' | '+')) => (
-                    format!("{p}"),
-                    Style::default()
-                        .fg(Color::LightGreen)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                _ => (" ".to_string(), Style::default()),
-            };
+    for entry in buf.users.iter().skip(buf.user_scroll_offset) {
+        let (prefix, raw_nick) = strip_user_prefix(entry);
+        let (prefix_str, prefix_style) = match prefix {
+            Some(p @ ('~' | '&' | '@')) => (
+                format!(" {p}"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Some(p @ ('%' | '+')) => (
+                format!(" {p}"),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            _ => ("  ".to_string(), Style::default()),
+        };
 
-            let n_color = nick_color(raw_nick);
-            ListItem::new(Line::from(vec![
-                Span::styled(prefix_str, prefix_style),
-                Span::styled(raw_nick.to_string(), Style::default().fg(n_color)),
-            ]))
-        })
-        .collect();
+        let n_color = nick_color(raw_nick);
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(prefix_str, prefix_style),
+            Span::styled(raw_nick.to_string(), Style::default().fg(n_color)),
+        ])));
+    }
 
-    let list = List::new(items).block(block);
+    let list = List::new(items).block(Block::default().borders(Borders::LEFT));
     f.render_widget(list, area);
 }
 
@@ -698,14 +695,14 @@ mod tests {
                 },
                 TreeRow::Child {
                     buffer_idx: 1,
-                    connector: " ├─ ",
+                    connector: "  └ ",
                     name: "#linux".into(),
                     active: false,
                     unread: false,
                 },
                 TreeRow::Child {
                     buffer_idx: 2,
-                    connector: " └─ ",
+                    connector: "  └ ",
                     name: "#rust".into(),
                     active: false,
                     unread: false,
@@ -719,7 +716,7 @@ mod tests {
                 },
                 TreeRow::Child {
                     buffer_idx: 4,
-                    connector: " └─ ",
+                    connector: "  └ ",
                     name: "#debian".into(),
                     active: false,
                     unread: false,
