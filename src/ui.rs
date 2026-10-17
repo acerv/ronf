@@ -345,7 +345,7 @@ fn draw_users_sidebar(f: &mut Frame, app: &App, area: Rect) {
     items.push(ListItem::new(Line::from(Span::styled(
         format!(" Users ({count})"),
         Style::default()
-            .fg(Color::Yellow)
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ))));
 
