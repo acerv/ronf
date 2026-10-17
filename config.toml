@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Example configuration for ronf
 # Copy to ~/.config/ronf/config.toml or keep as ./config.toml
 
