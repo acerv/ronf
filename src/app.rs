@@ -1790,6 +1790,27 @@ impl App {
                     ChatLine::new(None, "* [list] End of /LIST", LineKind::System),
                 );
             }
+            Response::ERR_NICKNAMEINUSE => {
+                let current = self
+                    .nicks
+                    .get(server_id)
+                    .cloned()
+                    .unwrap_or_else(|| "irc_user".to_string());
+                let fallback = format!("{current}_");
+                self.nicks.insert(server_id.to_string(), fallback.clone());
+                if let Some(sender) = self.senders.get(server_id) {
+                    let _ = sender.send(Command::NICK(fallback.clone()));
+                }
+                let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
+                self.push_to_buffer(
+                    idx,
+                    ChatLine::new(
+                        None,
+                        format!("! Nickname '{current}' in use; switching to '{fallback}'"),
+                        LineKind::Error,
+                    ),
+                );
+            }
             Response::RPL_WELCOME
             | Response::RPL_YOURHOST
             | Response::RPL_CREATED
@@ -2243,5 +2264,25 @@ mod tests {
         let dm_idx = app.find_buffer("libera", "bob").unwrap();
         assert_eq!(app.buffers[dm_idx].kind, BufferKind::DirectMessage);
         assert!(app.buffers[dm_idx].highlight);
+    }
+
+    #[test]
+    fn appends_underscore_on_err_nicknameinuse() {
+        let mut app = test_app();
+        assert_eq!(app.nicks.get("libera").map(String::as_str), Some("irc_user"));
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Response(
+                    Response::ERR_NICKNAMEINUSE,
+                    vec!["*".into(), "irc_user".into(), "Nickname is already in use.".into()],
+                ),
+            },
+        );
+
+        assert_eq!(app.nicks.get("libera").map(String::as_str), Some("irc_user_"));
     }
 }
