@@ -284,7 +284,11 @@ pub enum UserCommand {
     Whois(String),
     Kick { nick: String, reason: Option<String> },
     Invite { nick: String, channel: Option<String> },
-    Mode { target: Option<String>, args: String },
+    Mode {
+        target: Option<String>,
+        args: String,
+        channel_only: bool,
+    },
     Away(Option<String>),
     Motd,
     List(Option<String>),
@@ -452,11 +456,13 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                     Some(UserCommand::Mode {
                         target: Some(first.to_string()),
                         args: rem.to_string(),
+                        channel_only: false,
                     })
                 } else {
                     Some(UserCommand::Mode {
                         target: None,
                         args: rest.to_string(),
+                        channel_only: false,
                     })
                 }
             }
@@ -466,6 +472,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             Some(UserCommand::Mode {
                 target: None,
                 args: format!("+b {mask}"),
+                channel_only: true,
             })
         }
         "/op" => {
@@ -473,6 +480,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             Some(UserCommand::Mode {
                 target: None,
                 args: format!("+o {nick}"),
+                channel_only: true,
             })
         }
         "/deop" => {
@@ -480,6 +488,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             Some(UserCommand::Mode {
                 target: None,
                 args: format!("-o {nick}"),
+                channel_only: true,
             })
         }
         "/voice" => {
@@ -487,6 +496,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             Some(UserCommand::Mode {
                 target: None,
                 args: format!("+v {nick}"),
+                channel_only: true,
             })
         }
         "/devoice" => {
@@ -494,6 +504,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             Some(UserCommand::Mode {
                 target: None,
                 args: format!("-v {nick}"),
+                channel_only: true,
             })
         }
         "/away" => {
@@ -1325,7 +1336,23 @@ impl App {
                     ),
                 );
             }
-            UserCommand::Mode { target, args } => {
+            UserCommand::Mode {
+                target,
+                args,
+                channel_only,
+            } => {
+                if channel_only && target.is_none() && self.active_buf().kind != BufferKind::Channel
+                {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            "Cannot use channel mode command outside a channel buffer",
+                            LineKind::Error,
+                        ),
+                    );
+                    return;
+                }
                 let target_name = match target {
                     Some(t) => t,
                     None if self.active_buf().kind == BufferKind::Channel => {
@@ -2314,14 +2341,16 @@ mod tests {
             parse_user_command("/op alice"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+o alice".to_string()
+                args: "+o alice".to_string(),
+                channel_only: true,
             })
         );
         assert_eq!(
             parse_user_command("/ban *!*@bad.host"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+b *!*@bad.host".to_string()
+                args: "+b *!*@bad.host".to_string(),
+                channel_only: true,
             })
         );
         assert_eq!(
