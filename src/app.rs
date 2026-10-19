@@ -734,6 +734,15 @@ impl App {
         })
     }
 
+    pub fn target_buffer_for_server(&self, server_id: &str) -> usize {
+        if self.active_buf().server_id.eq_ignore_ascii_case(server_id) {
+            self.active_buffer
+        } else {
+            self.find_server_buffer(server_id)
+                .unwrap_or(self.active_buffer)
+        }
+    }
+
     pub fn join_server_channels(&self, server_id: &str) {
         let Some(sender) = self.senders.get(server_id) else {
             return;
@@ -1773,8 +1782,9 @@ impl App {
             }
             Command::INVITE(invited, chan) => {
                 let by = sender_nick.unwrap_or_else(|| "someone".to_string());
+                let idx = self.target_buffer_for_server(server_id);
                 self.push_to_buffer(
-                    self.active_buffer,
+                    idx,
                     ChatLine::new(
                         None,
                         format!("* {by} invited {invited} to {chan}"),
@@ -1801,13 +1811,14 @@ impl App {
                 self.handle_numeric_response(server_id, resp, args);
             }
             Command::Raw(code, args) => {
-                self.handle_raw_numeric(code.as_str(), args);
+                self.handle_raw_numeric(server_id, code.as_str(), args);
             }
             _ => {}
         }
     }
 
-    fn handle_raw_numeric(&mut self, code: &str, args: Vec<String>) {
+    fn handle_raw_numeric(&mut self, server_id: &str, code: &str, args: Vec<String>) {
+        let idx = self.target_buffer_for_server(server_id);
         match code {
             "330" => {
                 // RPL_WHOISACCOUNT: [<me>, <nick>, <account>, "is logged in as"]
@@ -1815,7 +1826,7 @@ impl App {
                     let nick = &args[1];
                     let account = &args[2];
                     self.push_to_buffer(
-                        self.active_buffer,
+                        idx,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} is logged in as {account}"),
@@ -1830,7 +1841,7 @@ impl App {
                     let nick = &args[1];
                     let info = args[2..].join(" ");
                     self.push_to_buffer(
-                        self.active_buffer,
+                        idx,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} {info}"),
@@ -1844,6 +1855,7 @@ impl App {
     }
 
     fn handle_numeric_response(&mut self, server_id: &str, resp: Response, args: Vec<String>) {
+        let srv_target = self.target_buffer_for_server(server_id);
         match resp {
             Response::RPL_NOTOPIC => {
                 if args.len() >= 2 {
@@ -1909,7 +1921,7 @@ impl App {
                     let host = &args[3];
                     let real = args[5..].join(" ");
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} ({user}@{host}): {real}"),
@@ -1924,7 +1936,7 @@ impl App {
                     let srv = &args[2];
                     let info = args[3..].join(" ");
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} server: {srv} ({info})"),
@@ -1938,7 +1950,7 @@ impl App {
                     let nick = &args[1];
                     let info = args[2..].join(" ");
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} {info}"),
@@ -1952,7 +1964,7 @@ impl App {
                     let nick = &args[1];
                     let secs = &args[2];
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} idle: {secs}s"),
@@ -1966,7 +1978,7 @@ impl App {
                     let nick = &args[1];
                     let chans = args[2..].join(" ");
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} channels: {chans}"),
@@ -1979,7 +1991,7 @@ impl App {
                 if args.len() >= 2 {
                     let nick = &args[1];
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [whois] {nick} End of WHOIS"),
@@ -1995,7 +2007,7 @@ impl App {
                     args.join(" ")
                 };
                 self.push_to_buffer(
-                    self.active_buffer,
+                    srv_target,
                     ChatLine::new(None, format!("* {text}"), LineKind::System),
                 );
             }
@@ -2009,7 +2021,7 @@ impl App {
                         String::new()
                     };
                     self.push_to_buffer(
-                        self.active_buffer,
+                        srv_target,
                         ChatLine::new(
                             None,
                             format!("* [list] {chan} ({count}): {topic}"),
@@ -2020,7 +2032,7 @@ impl App {
             }
             Response::RPL_LISTEND => {
                 self.push_to_buffer(
-                    self.active_buffer,
+                    srv_target,
                     ChatLine::new(None, "* [list] End of /LIST", LineKind::System),
                 );
             }
@@ -2071,7 +2083,7 @@ impl App {
                     args.join(" ")
                 };
                 self.push_to_buffer(
-                    self.active_buffer,
+                    srv_target,
                     ChatLine::new(None, format!("! {text}"), LineKind::Error),
                 );
             }
