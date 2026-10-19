@@ -68,6 +68,7 @@ channels = [
 - `Up` / `Down`: Navigate sent message history
 - `Ctrl+w`: Delete word before cursor
 - `Ctrl+u`: Clear input line
+- `Ctrl+c`: Cancel current input line
 - `Home` (`Ctrl+a`) / `End` (`Ctrl+e`): Move cursor to start / end of line
 
 ### Slash Commands

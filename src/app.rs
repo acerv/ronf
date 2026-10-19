@@ -829,7 +829,11 @@ impl App {
 
         if ctrl {
             match key.code {
-                KeyCode::Char('c') | KeyCode::Char('q') => {
+                KeyCode::Char('c') => {
+                    self.cancel_input_line();
+                    return;
+                }
+                KeyCode::Char('q') => {
                     self.quit_all(None);
                     return;
                 }
@@ -989,6 +993,14 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    pub fn cancel_input_line(&mut self) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.history_index = None;
+        self.saved_draft.clear();
+        self.tab_state = None;
     }
 
     pub fn delete_word_backwards(&mut self) {

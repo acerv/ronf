@@ -502,6 +502,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("End / Ctrl+e", "Move cursor to end of line"),
                 ("Ctrl+w", "Delete word before cursor"),
                 ("Ctrl+u", "Clear entire input line"),
+                ("Ctrl+c", "Cancel current input line"),
                 ("Enter", "Send message or /command"),
             ],
         ),
@@ -544,7 +545,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("PgUp / PgDn", "Scroll help one page"),
                 ("g / G", "Top / bottom of help"),
                 ("Esc / q / Enter", "Close help dialog"),
-                ("Ctrl+c / Ctrl+q", "Quit ronf"),
+                ("Ctrl+q", "Quit ronf"),
             ],
         ),
     ]
