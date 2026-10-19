@@ -5,6 +5,8 @@ A minimal, terminal-based multi-server IRC client written in Rust.
 `ronf` connects to multiple IRC networks concurrently and presents a clean
 interface designed to match a lightweight, keyboard-driven workflow.
 
+![ronf screenshot](screen.png)
+
 ## Installation & Build
 
 Ensure you have a Rust toolchain installed:
