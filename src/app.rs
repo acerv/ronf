@@ -1598,6 +1598,11 @@ impl App {
     pub fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::Connected { server_id, sender } => {
+                for buf in &mut self.buffers {
+                    if buf.server_id.eq_ignore_ascii_case(&server_id) {
+                        buf.pending_names.clear();
+                    }
+                }
                 self.senders.insert(server_id.clone(), sender);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_to_buffer(
@@ -1970,10 +1975,8 @@ impl App {
                     let chan = &args[1];
                     if let Some(idx) = self.find_buffer(server_id, chan) {
                         let pending = std::mem::take(&mut self.buffers[idx].pending_names);
-                        if !pending.is_empty() {
-                            self.buffers[idx].users = pending;
-                            self.buffers[idx].sort_users();
-                        }
+                        self.buffers[idx].users = pending;
+                        self.buffers[idx].sort_users();
                     }
                 }
             }
