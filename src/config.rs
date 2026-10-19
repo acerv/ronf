@@ -87,10 +87,16 @@ impl ServerConfig {
         Ok(self.nick_password.clone())
     }
 
-    pub fn to_irc_config(&self, fallback_nick: Option<&str>) -> Result<IrcConfig> {
+    pub fn validate_structure(&self, fallback_nick: Option<&str>) -> Result<()> {
         if self.server.trim().is_empty() {
             bail!("Server hostname cannot be empty");
         }
+        self.effective_nickname(fallback_nick)?;
+        Ok(())
+    }
+
+    pub fn to_irc_config(&self, fallback_nick: Option<&str>) -> Result<IrcConfig> {
+        self.validate_structure(fallback_nick)?;
         let nickname = self.effective_nickname(fallback_nick)?;
         let use_tls = self.effective_tls();
         let port = self.effective_port();
@@ -221,7 +227,7 @@ impl AppConfig {
                 continue;
             }
             enabled_count += 1;
-            srv.to_irc_config(self.default_nickname.as_deref())
+            srv.validate_structure(self.default_nickname.as_deref())
                 .with_context(|| format!("Invalid config for [servers.{id}]"))?;
         }
 
