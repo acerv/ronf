@@ -958,8 +958,10 @@ impl App {
         let before = &self.input[..self.cursor_pos];
         let trimmed_ws = before.trim_end_matches(char::is_whitespace);
         let word_start = trimmed_ws
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
         self.input.replace_range(word_start..self.cursor_pos, "");
         self.cursor_pos = word_start;
@@ -1014,8 +1016,10 @@ impl App {
 
         let before_cursor = &self.input[..self.cursor_pos];
         let token_start = before_cursor
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
         let token = &before_cursor[token_start..];
         if token.is_empty() {
@@ -2476,6 +2480,15 @@ mod tests {
         app.cursor_pos = 2;
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input, "/join ");
+
+        // Multi-byte Unicode whitespace (U+00A0 NO-BREAK SPACE) does not panic on Tab or Ctrl+W
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.input = "ab\u{00a0}al".to_string();
+        app.cursor_pos = app.input.len();
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input, "ab\u{00a0}alice ");
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, "ab\u{00a0}");
     }
 
     #[test]
