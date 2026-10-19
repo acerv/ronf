@@ -910,7 +910,8 @@ impl App {
             }
             KeyCode::PageUp => {
                 let buf = self.active_buf_mut();
-                buf.scroll_offset = buf.scroll_offset.saturating_add(5);
+                let max_scroll = buf.messages.len().saturating_sub(1);
+                buf.scroll_offset = buf.scroll_offset.saturating_add(5).min(max_scroll);
             }
             KeyCode::PageDown => {
                 let buf = self.active_buf_mut();

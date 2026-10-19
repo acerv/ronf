@@ -250,11 +250,86 @@ pub fn wrapped_line_height(line: &Line, width: usize) -> usize {
     if width == 0 {
         return 1;
     }
-    let char_count: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    if char_count == 0 {
-        1
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if text.is_empty() {
+        return 1;
+    }
+
+    let mut rows = 1usize;
+    let mut col = 0usize;
+    let mut chars = text.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            let mut ws_len = 0usize;
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    ws_len += char_display_width(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if col + ws_len <= width {
+                col += ws_len;
+            } else {
+                let rem = (col + ws_len) - width;
+                rows += 1 + rem / width;
+                col = rem % width;
+            }
+        } else {
+            let mut word_len = 0usize;
+            while let Some(&c) = chars.peek() {
+                if !c.is_whitespace() {
+                    word_len += char_display_width(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if col == 0 {
+                if word_len <= width {
+                    col = word_len;
+                } else {
+                    rows += (word_len - 1) / width;
+                    col = word_len % width;
+                    if col == 0 {
+                        col = width;
+                    }
+                }
+            } else if col + word_len <= width {
+                col += word_len;
+            } else {
+                rows += 1;
+                if word_len <= width {
+                    col = word_len;
+                } else {
+                    rows += (word_len - 1) / width;
+                    col = word_len % width;
+                    if col == 0 {
+                        col = width;
+                    }
+                }
+            }
+        }
+    }
+
+    rows
+}
+
+fn char_display_width(c: char) -> usize {
+    let u = c as u32;
+    if (0x1100..=0x115F).contains(&u)
+        || (0x2E80..=0xA4CF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE10..=0xFE6F).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0x1F300..=0x1FAFF).contains(&u)
+    {
+        2
     } else {
-        char_count.div_ceil(width)
+        1
     }
 }
 
@@ -789,6 +864,9 @@ mod tests {
 
         let long = Line::from("a".repeat(165));
         assert_eq!(wrapped_line_height(&long, 80), 3);
+
+        let word_wrapped = Line::from("aaaaa bbbbb ccccc");
+        assert_eq!(wrapped_line_height(&word_wrapped, 10), 3);
     }
 
     #[test]
