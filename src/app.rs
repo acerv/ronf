@@ -92,6 +92,7 @@ pub struct Buffer {
     pub scroll_offset: usize,
     pub unread: bool,
     pub highlight: bool,
+    pub parted: bool,
 }
 
 impl Buffer {
@@ -108,6 +109,7 @@ impl Buffer {
             scroll_offset: 0,
             unread: false,
             highlight: false,
+            parted: false,
         }
     }
 
@@ -748,7 +750,10 @@ impl App {
             return;
         };
         for buf in &self.buffers {
-            if buf.server_id.eq_ignore_ascii_case(server_id) && buf.kind == BufferKind::Channel {
+            if buf.server_id.eq_ignore_ascii_case(server_id)
+                && buf.kind == BufferKind::Channel
+                && !buf.parted
+            {
                 let _ = sender.send_join(&buf.name);
             }
         }
@@ -1126,6 +1131,7 @@ impl App {
                     let _ = sender.send_join(&channel);
                 }
                 let idx = self.ensure_buffer(&server_id, &channel, BufferKind::Channel);
+                self.buffers[idx].parted = false;
                 self.select_buffer(idx);
             }
             UserCommand::Part(reason) => {
@@ -1140,6 +1146,10 @@ impl App {
                 if let Some(sender) = self.senders.get(&server_id) {
                     let _ = sender.send(Command::PART(chan.clone(), reason));
                 }
+                let buf = self.active_buf_mut();
+                buf.parted = true;
+                buf.users.clear();
+                buf.pending_names.clear();
                 self.push_to_buffer(
                     self.active_buffer,
                     ChatLine::new(None, format!("Left {chan}"), LineKind::System),
@@ -1200,6 +1210,17 @@ impl App {
                         ChatLine::new(
                             None,
                             "Cannot send /me in a server buffer",
+                            LineKind::Error,
+                        ),
+                    );
+                    return;
+                }
+                if self.active_buf().parted {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            "Cannot send to parted channel (use /join to rejoin)",
                             LineKind::Error,
                         ),
                     );
@@ -1516,6 +1537,17 @@ impl App {
                     );
                     return;
                 }
+                if self.active_buf().parted {
+                    self.push_to_buffer(
+                        self.active_buffer,
+                        ChatLine::new(
+                            None,
+                            "Cannot send to parted channel (use /join to rejoin)",
+                            LineKind::Error,
+                        ),
+                    );
+                    return;
+                }
                 let target = self.active_buf().name.clone();
                 if let Some(sender) = self.senders.get(&server_id) {
                     let _ = sender.send_privmsg(&target, &text);
@@ -1644,6 +1676,9 @@ impl App {
             Command::JOIN(chan, _, _) => {
                 let idx = self.ensure_buffer(server_id, &chan, BufferKind::Channel);
                 if let Some(nick) = sender_nick {
+                    if nick.eq_ignore_ascii_case(&my_nick) {
+                        self.buffers[idx].parted = false;
+                    }
                     self.buffers[idx].add_user(&nick);
                     let should_show = self
                         .show_join_part
