@@ -1243,7 +1243,18 @@ impl App {
                 let target = self.active_buf().name.clone();
                 if let Some(sender) = self.senders.get(&server_id) {
                     let ctcp = format!("\x01ACTION {action}\x01");
-                    let _ = sender.send_privmsg(&target, &ctcp);
+                    if sender.send_privmsg(&target, &ctcp).is_err() {
+                        self.senders.remove(&server_id);
+                        self.push_to_buffer(
+                            self.active_buffer,
+                            ChatLine::new(
+                                None,
+                                format!("Not connected to [{server_id}]; message not sent"),
+                                LineKind::Error,
+                            ),
+                        );
+                        return;
+                    }
                 }
                 self.push_to_buffer(
                     self.active_buffer,
@@ -1580,7 +1591,18 @@ impl App {
                 }
                 let target = self.active_buf().name.clone();
                 if let Some(sender) = self.senders.get(&server_id) {
-                    let _ = sender.send_privmsg(&target, &text);
+                    if sender.send_privmsg(&target, &text).is_err() {
+                        self.senders.remove(&server_id);
+                        self.push_to_buffer(
+                            self.active_buffer,
+                            ChatLine::new(
+                                None,
+                                format!("Not connected to [{server_id}]; message not sent"),
+                                LineKind::Error,
+                            ),
+                        );
+                        return;
+                    }
                 }
                 self.push_to_buffer(
                     self.active_buffer,
@@ -1619,6 +1641,7 @@ impl App {
                 }
             }
             ServerEvent::Error { server_id, error } => {
+                self.senders.remove(&server_id);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_to_buffer(idx, ChatLine::new(None, error, LineKind::Error));
                 }
