@@ -104,7 +104,7 @@ impl ServerConfig {
             server: Some(self.server.clone()),
             port: Some(port),
             use_tls: Some(use_tls),
-            channels: self.channels.clone(),
+            channels: Vec::new(),
             password,
             nick_password,
             client_cert_path: self.client_cert_path.clone(),
@@ -267,7 +267,8 @@ mod tests {
         assert_eq!(libera_irc.nickname.as_deref(), Some("irc_user"));
         assert_eq!(libera_irc.port, Some(6697));
         assert_eq!(libera_irc.use_tls, Some(true));
-        assert_eq!(libera_irc.channels, vec!["#linux", "#rust"]);
+        assert!(libera_irc.channels.is_empty());
+        assert_eq!(libera.channels, vec!["#linux", "#rust"]);
 
         let oftc = &cfg.servers["oftc"];
         let oftc_irc = oftc.to_irc_config(cfg.default_nickname.as_deref()).unwrap();

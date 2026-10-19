@@ -734,6 +734,17 @@ impl App {
         })
     }
 
+    pub fn join_server_channels(&self, server_id: &str) {
+        let Some(sender) = self.senders.get(server_id) else {
+            return;
+        };
+        for buf in &self.buffers {
+            if buf.server_id.eq_ignore_ascii_case(server_id) && buf.kind == BufferKind::Channel {
+                let _ = sender.send_join(&buf.name);
+            }
+        }
+    }
+
     /// Ensures a buffer for `(server_id, name, kind)` exists, inserting it at the end of
     /// `server_id`'s group in `self.buffers` so the tree remains grouped by server.
     pub fn ensure_buffer(&mut self, server_id: &str, name: &str, kind: BufferKind) -> usize {
@@ -1518,13 +1529,6 @@ impl App {
     pub fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::Connected { server_id, sender } => {
-                for buf in &self.buffers {
-                    if buf.server_id.eq_ignore_ascii_case(&server_id)
-                        && buf.kind == BufferKind::Channel
-                    {
-                        let _ = sender.send_join(&buf.name);
-                    }
-                }
                 self.senders.insert(server_id.clone(), sender);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_to_buffer(
@@ -2046,7 +2050,8 @@ impl App {
             | Response::RPL_CREATED
             | Response::RPL_MOTDSTART
             | Response::RPL_MOTD
-            | Response::RPL_ENDOFMOTD => {
+            | Response::RPL_ENDOFMOTD
+            | Response::ERR_NOMOTD => {
                 if let Some(srv_idx) = self.find_server_buffer(server_id) {
                     let text = if args.len() > 1 {
                         args[1..].join(" ")
@@ -2054,6 +2059,9 @@ impl App {
                         args.join(" ")
                     };
                     self.push_to_buffer(srv_idx, ChatLine::new(None, text, LineKind::System));
+                }
+                if matches!(resp, Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD) {
+                    self.join_server_channels(server_id);
                 }
             }
             _ if resp.is_error() => {
