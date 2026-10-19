@@ -122,11 +122,8 @@ impl Buffer {
 
     pub fn sort_users(&mut self) {
         for user in &mut self.users {
-            let (pref, raw) = strip_user_prefix(user);
-            *user = match pref {
-                Some(p) => format!("{p}{raw}"),
-                None => raw.to_string(),
-            };
+            let (prefixes, raw) = extract_user_prefixes(user);
+            *user = format!("{prefixes}{raw}");
         }
         self.users.sort_by(|a, b| {
             let (pref_a, nick_a) = strip_user_prefix(a);
@@ -173,12 +170,9 @@ impl Buffer {
         let (_, new_raw) = strip_user_prefix(new_nick);
         let mut found = false;
         for user in &mut self.users {
-            let (prefix, n) = strip_user_prefix(user);
+            let (prefixes, n) = extract_user_prefixes(user);
             if n.eq_ignore_ascii_case(old_raw) {
-                *user = match prefix {
-                    Some(p) => format!("{p}{new_raw}"),
-                    None => new_raw.to_string(),
-                };
+                *user = format!("{prefixes}{new_raw}");
                 found = true;
             }
         }
@@ -199,9 +193,10 @@ impl Buffer {
                             let (_, n) = strip_user_prefix(u);
                             n.eq_ignore_ascii_case(target_raw)
                         }) {
-                            let (cur_pref, raw) = strip_user_prefix(user);
-                            if cur_pref.is_none_or(|cur| role_rank(Some(new_pref)) <= role_rank(Some(cur))) {
-                                *user = format!("{new_pref}{raw}");
+                            let (mut prefixes, raw) = extract_user_prefixes(user);
+                            if !prefixes.contains(new_pref) {
+                                prefixes.push(new_pref);
+                                *user = format!("{prefixes}{raw}");
                                 changed = true;
                             }
                         }
@@ -214,9 +209,11 @@ impl Buffer {
                             let (_, n) = strip_user_prefix(u);
                             n.eq_ignore_ascii_case(target_raw)
                         }) {
-                            let (cur_pref, raw) = strip_user_prefix(user);
-                            if cur_pref == Some(rem_pref) {
-                                *user = raw.to_string();
+                            let (prefixes, raw) = extract_user_prefixes(user);
+                            if prefixes.contains(rem_pref) {
+                                let remaining: String =
+                                    prefixes.chars().filter(|&c| c != rem_pref).collect();
+                                *user = format!("{remaining}{raw}");
                                 changed = true;
                             }
                         }
@@ -242,22 +239,28 @@ fn channel_mode_prefix(cm: &ChannelMode) -> Option<char> {
     }
 }
 
-pub fn strip_user_prefix(entry: &str) -> (Option<char>, &str) {
-    let mut best_prefix: Option<char> = None;
+pub fn extract_user_prefixes(entry: &str) -> (String, &str) {
+    let mut prefs: Vec<char> = Vec::new();
     let mut byte_offset = 0;
 
     for ch in entry.chars() {
         if matches!(ch, '~' | '&' | '@' | '%' | '+') {
             byte_offset += ch.len_utf8();
-            if best_prefix.is_none_or(|cur| role_rank(Some(ch)) < role_rank(Some(cur))) {
-                best_prefix = Some(ch);
+            if !prefs.contains(&ch) {
+                prefs.push(ch);
             }
         } else {
             break;
         }
     }
 
-    (best_prefix, &entry[byte_offset..])
+    prefs.sort_by_key(|&c| role_rank(Some(c)));
+    (prefs.into_iter().collect(), &entry[byte_offset..])
+}
+
+pub fn strip_user_prefix(entry: &str) -> (Option<char>, &str) {
+    let (prefs, raw) = extract_user_prefixes(entry);
+    (prefs.chars().next(), raw)
 }
 
 fn role_rank(prefix: Option<char>) -> u8 {
@@ -2474,10 +2477,10 @@ mod tests {
 
         assert_eq!(
             app.buffers[rust_idx].users,
-            vec!["@ferris", "+bob", "alice", "charlie"]
+            vec!["@+ferris", "+bob", "alice", "charlie"]
         );
 
-        // NICK change preserves @ role prefix
+        // NICK change preserves @+ role prefixes
         app.handle_irc_message(
             "libera",
             Message {
@@ -2488,7 +2491,7 @@ mod tests {
         );
         assert_eq!(
             app.buffers[rust_idx].users,
-            vec!["@ferris_bot", "+bob", "alice", "charlie"]
+            vec!["@+ferris_bot", "+bob", "alice", "charlie"]
         );
 
         // PART removes user
@@ -2502,7 +2505,7 @@ mod tests {
         );
         assert_eq!(
             app.buffers[rust_idx].users,
-            vec!["@ferris_bot", "+bob", "charlie"]
+            vec!["@+ferris_bot", "+bob", "charlie"]
         );
 
         // ChannelMODE +o charlie promotes charlie to @charlie and re-sorts
@@ -2519,10 +2522,10 @@ mod tests {
         );
         assert_eq!(
             app.buffers[rust_idx].users,
-            vec!["@charlie", "@ferris_bot", "+bob"]
+            vec!["@charlie", "@+ferris_bot", "+bob"]
         );
 
-        // ChannelMODE -o charlie demotes charlie back to regular user
+        // ChannelMODE -o ferris_bot demotes ferris_bot from @+ to +ferris_bot (preserving voice!)
         app.handle_irc_message(
             "libera",
             Message {
@@ -2530,13 +2533,13 @@ mod tests {
                 prefix: Some(Prefix::Nickname("ChanServ".into(), "c".into(), "h".into())),
                 command: Command::ChannelMODE(
                     "#rust".into(),
-                    vec![Mode::Minus(ChannelMode::Oper, Some("charlie".into()))],
+                    vec![Mode::Minus(ChannelMode::Oper, Some("ferris_bot".into()))],
                 ),
             },
         );
         assert_eq!(
             app.buffers[rust_idx].users,
-            vec!["@ferris_bot", "+bob", "charlie"]
+            vec!["@charlie", "+bob", "+ferris_bot"]
         );
     }
 
