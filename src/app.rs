@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use irc::client::Sender;
 use irc::proto::{ChannelMode, Command, Message, Mode, Prefix, Response};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, DEFAULT_HISTORY_LIMIT};
 
 pub const SLASH_COMMANDS: &[&str] = &[
     "/help",
@@ -89,6 +89,7 @@ pub struct Buffer {
     pub pending_names: Vec<String>,
     pub user_scroll_offset: usize,
     pub messages: Vec<ChatLine>,
+    pub history_cursor: Option<usize>,
     pub scroll_offset: usize,
     pub unread: bool,
     pub highlight: bool,
@@ -106,6 +107,7 @@ impl Buffer {
             pending_names: Vec::new(),
             user_scroll_offset: 0,
             messages: Vec::new(),
+            history_cursor: None,
             scroll_offset: 0,
             unread: false,
             highlight: false,
@@ -600,6 +602,7 @@ pub struct App {
     pub active_buffer: usize,
     pub nicks: BTreeMap<String, String>,
     pub show_join_part: BTreeMap<String, bool>,
+    pub history_limits: BTreeMap<String, usize>,
     pub ignored_nicks: BTreeSet<String>,
     pub senders: HashMap<String, Sender>,
     pub input: String,
@@ -619,17 +622,20 @@ impl App {
         let mut buffers = Vec::new();
         let mut nicks = BTreeMap::new();
         let mut show_join_part = BTreeMap::new();
+        let mut history_limits = BTreeMap::new();
         let log_dir = config.effective_log_dir();
 
         for (server_id, srv) in config.enabled_servers() {
             let nick = srv
                 .effective_nickname(config.default_nickname.as_deref())
                 .unwrap_or_else(|_| "irc_user".to_string());
+            let limit = srv.effective_history_limit(config.history_limit);
             nicks.insert(server_id.clone(), nick);
             show_join_part.insert(
                 server_id.clone(),
                 srv.effective_show_join_part(config.show_join_part),
             );
+            history_limits.insert(server_id.clone(), limit);
 
             let mut srv_buf = Buffer::new(server_id.clone(), server_id.clone(), BufferKind::Server);
             srv_buf.push_line(
@@ -654,9 +660,14 @@ impl App {
                     BufferKind::Channel,
                 );
                 if let Some(ref dir) = log_dir {
-                    load_buffer_history(dir, &mut chan_buf);
+                    load_more_buffer_history(dir, &mut chan_buf, limit);
                 }
                 buffers.push(chan_buf);
+            }
+
+            if let Some(ref dir) = log_dir {
+                let dm_buffers = discover_dm_buffers(dir, server_id, &buffers, limit);
+                buffers.extend(dm_buffers);
             }
         }
 
@@ -665,6 +676,7 @@ impl App {
             active_buffer: 0,
             nicks,
             show_join_part,
+            history_limits,
             ignored_nicks: BTreeSet::new(),
             senders: HashMap::new(),
             input: String::new(),
@@ -678,6 +690,13 @@ impl App {
             help_scroll: 0,
             should_quit: false,
         }
+    }
+
+    pub fn history_limit_for(&self, server_id: &str) -> usize {
+        self.history_limits
+            .get(server_id)
+            .copied()
+            .unwrap_or(DEFAULT_HISTORY_LIMIT)
     }
 
     pub fn active_buf(&self) -> &Buffer {
@@ -788,8 +807,9 @@ impl App {
             .unwrap_or(self.buffers.len());
 
         let mut buf = Buffer::new(server_id.to_string(), name.to_string(), kind);
+        let limit = self.history_limit_for(server_id);
         if let Some(ref dir) = self.log_dir {
-            load_buffer_history(dir, &mut buf);
+            load_more_buffer_history(dir, &mut buf, limit);
         }
         self.buffers.insert(insert_pos, buf);
 
@@ -932,7 +952,15 @@ impl App {
                 }
             }
             KeyCode::PageUp => {
+                let server_id = self.active_server_id();
+                let limit = self.history_limit_for(&server_id);
+                let log_dir = self.log_dir.clone();
                 let buf = self.active_buf_mut();
+                if buf.scroll_offset.saturating_add(5) >= buf.messages.len().saturating_sub(1) {
+                    if let Some(ref dir) = log_dir {
+                        load_more_buffer_history(dir, buf, limit);
+                    }
+                }
                 let max_scroll = buf.messages.len().saturating_sub(1);
                 buf.scroll_offset = buf.scroll_offset.saturating_add(5).min(max_scroll);
             }
@@ -1550,6 +1578,7 @@ impl App {
             UserCommand::Clear => {
                 let buf = self.active_buf_mut();
                 buf.messages.clear();
+                buf.history_cursor = Some(0);
                 buf.scroll_offset = 0;
             }
             UserCommand::Close => {
@@ -2265,11 +2294,15 @@ fn next_char_boundary(s: &str, byte_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
+fn server_log_dir(base_dir: &Path, server_id: &str) -> PathBuf {
     let safe_srv: String = server_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
+    base_dir.join(safe_srv)
+}
+
+fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
     let safe_buf: String = buf_name
         .chars()
         .map(|c| {
@@ -2280,7 +2313,7 @@ fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf 
             }
         })
         .collect();
-    base_dir.join(safe_srv).join(format!("{safe_buf}.log"))
+    server_log_dir(base_dir, server_id).join(format!("{safe_buf}.log"))
 }
 
 fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
@@ -2303,43 +2336,116 @@ fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &Ch
     }
 }
 
-fn load_buffer_history(base_dir: &Path, buf: &mut Buffer) {
-    if buf.kind == BufferKind::Server {
-        return;
+fn parse_log_line(raw: &str) -> Option<ChatLine> {
+    let rest = raw.strip_prefix('[')?;
+    let (ts, after_ts) = rest.split_once("] ")?;
+    if let Some(action_rest) = after_ts.strip_prefix("* ") {
+        let (actor, act_text) = action_rest.split_once(' ')?;
+        Some(ChatLine {
+            timestamp: ts.to_string(),
+            sender: Some(actor.to_string()),
+            content: act_text.to_string(),
+            kind: LineKind::Action,
+        })
+    } else if let Some(nick_rest) = after_ts.strip_prefix('<') {
+        let (sender, msg_text) = nick_rest.split_once("> ")?;
+        Some(ChatLine {
+            timestamp: ts.to_string(),
+            sender: Some(sender.to_string()),
+            content: msg_text.to_string(),
+            kind: LineKind::Normal,
+        })
+    } else {
+        None
+    }
+}
+
+fn load_more_buffer_history(base_dir: &Path, buf: &mut Buffer, limit: usize) -> usize {
+    if buf.kind == BufferKind::Server || limit == 0 || buf.history_cursor == Some(0) {
+        return 0;
     }
     let path = buffer_log_path(base_dir, &buf.server_id, &buf.name);
     let Ok(content) = fs::read_to_string(path) else {
-        return;
+        buf.history_cursor = Some(0);
+        return 0;
     };
     let all_lines: Vec<&str> = content.lines().collect();
-    let start = all_lines.len().saturating_sub(100);
-    for raw in &all_lines[start..] {
-        if let Some(rest) = raw.strip_prefix('[') {
-            if let Some((ts, after_ts)) = rest.split_once("] ") {
-                if let Some(action_rest) = after_ts.strip_prefix("* ") {
-                    if let Some((actor, act_text)) = action_rest.split_once(' ') {
-                        buf.messages.push(ChatLine {
-                            timestamp: ts.to_string(),
-                            sender: Some(actor.to_string()),
-                            content: act_text.to_string(),
-                            kind: LineKind::Action,
-                        });
-                        continue;
-                    }
-                } else if let Some(nick_rest) = after_ts.strip_prefix('<') {
-                    if let Some((sender, msg_text)) = nick_rest.split_once("> ") {
-                        buf.messages.push(ChatLine {
-                            timestamp: ts.to_string(),
-                            sender: Some(sender.to_string()),
-                            content: msg_text.to_string(),
-                            kind: LineKind::Normal,
-                        });
-                        continue;
-                    }
-                }
+    let end = buf
+        .history_cursor
+        .unwrap_or(all_lines.len())
+        .min(all_lines.len());
+    if end == 0 {
+        buf.history_cursor = Some(0);
+        return 0;
+    }
+
+    let mut batch = Vec::with_capacity(limit.min(end));
+    let mut new_cursor = 0usize;
+    for idx in (0..end).rev() {
+        if let Some(line) = parse_log_line(all_lines[idx]) {
+            batch.push(line);
+            if batch.len() == limit {
+                new_cursor = idx;
+                break;
             }
         }
     }
+
+    buf.history_cursor = Some(new_cursor);
+    batch.reverse();
+    let loaded = batch.len();
+    if loaded > 0 {
+        buf.messages.splice(0..0, batch);
+    }
+    loaded
+}
+
+fn discover_dm_buffers(
+    base_dir: &Path,
+    server_id: &str,
+    existing: &[Buffer],
+    limit: usize,
+) -> Vec<Buffer> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let srv_dir = server_log_dir(base_dir, server_id);
+    let Ok(entries) = fs::read_dir(srv_dir) else {
+        return Vec::new();
+    };
+
+    let mut dm_names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("log") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_string();
+            if stem.is_empty() || stem.starts_with('#') || stem.starts_with('&') {
+                return None;
+            }
+            let already_exists = existing.iter().any(|b| {
+                b.server_id.eq_ignore_ascii_case(server_id) && b.name.eq_ignore_ascii_case(&stem)
+            });
+            if already_exists {
+                None
+            } else {
+                Some(stem)
+            }
+        })
+        .collect();
+
+    dm_names.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+
+    let mut dm_buffers = Vec::new();
+    for name in dm_names {
+        let mut dm_buf = Buffer::new(server_id.to_string(), name, BufferKind::DirectMessage);
+        if load_more_buffer_history(base_dir, &mut dm_buf, limit) > 0 {
+            dm_buffers.push(dm_buf);
+        }
+    }
+    dm_buffers
 }
 
 #[cfg(test)]
@@ -2862,6 +2968,142 @@ mod tests {
         let rust_idx = app2.find_buffer("libera", "#rust").unwrap();
         assert_eq!(app2.buffers[rust_idx].messages.len(), 1);
         assert_eq!(app2.buffers[rust_idx].messages[0].content, "logged message");
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn history_limit_startup_dynamic_pageup_and_dm_restore_work() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ronf_test_hist_limit_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            log_dir = "{}"
+            history_limit = 2
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+
+        // Log 5 channel messages and 2 DM messages from alice
+        for i in 1..=5 {
+            app.handle_irc_message(
+                "libera",
+                Message {
+                    tags: None,
+                    prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                    command: Command::PRIVMSG("#rust".into(), format!("msg {i}")),
+                },
+            );
+        }
+        for i in 1..=2 {
+            app.handle_irc_message(
+                "libera",
+                Message {
+                    tags: None,
+                    prefix: Some(Prefix::Nickname("bob".into(), "b".into(), "h".into())),
+                    command: Command::PRIVMSG("irc_user".into(), format!("dm {i}")),
+                },
+            );
+        }
+
+        // Start a fresh App instance with history_limit = 2
+        let mut app2 = App::from_config(&cfg);
+        let rust_idx = app2.find_buffer("libera", "#rust").unwrap();
+        assert_eq!(
+            app2.buffers[rust_idx]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg 4", "msg 5"]
+        );
+
+        // Past DM buffer with bob is automatically restored at startup without unread/highlight
+        let bob_idx = app2.find_buffer("libera", "bob").expect("bob DM restored");
+        assert_eq!(app2.buffers[bob_idx].kind, BufferKind::DirectMessage);
+        assert!(!app2.buffers[bob_idx].unread);
+        assert!(!app2.buffers[bob_idx].highlight);
+        assert_eq!(
+            app2.buffers[bob_idx]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dm 1", "dm 2"]
+        );
+
+        // Receive a live message in #rust during the new session (appends to log on disk)
+        app2.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "msg 6".into()),
+            },
+        );
+        app2.select_buffer(rust_idx);
+        assert_eq!(
+            app2.buffers[rust_idx]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg 4", "msg 5", "msg 6"]
+        );
+
+        // First PgUp at the top prepends the previous batch of 2 older messages ("msg 2", "msg 3")
+        app2.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(
+            app2.buffers[rust_idx]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg 2", "msg 3", "msg 4", "msg 5", "msg 6"]
+        );
+        assert_eq!(app2.buffers[rust_idx].scroll_offset, 4);
+
+        // Second PgUp prepends the remaining oldest message ("msg 1") and reaches cursor 0
+        app2.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(
+            app2.buffers[rust_idx]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg 1", "msg 2", "msg 3", "msg 4", "msg 5", "msg 6"]
+        );
+        assert_eq!(app2.buffers[rust_idx].history_cursor, Some(0));
+        assert_eq!(app2.buffers[rust_idx].scroll_offset, 5);
+
+        // Verify history_limit = 0 loads no history and restores no DM buffers
+        let zero_toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            log_dir = "{}"
+            history_limit = 0
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+        let zero_cfg = AppConfig::from_toml_str(&zero_toml).unwrap();
+        let app_zero = App::from_config(&zero_cfg);
+        let zero_rust = app_zero.find_buffer("libera", "#rust").unwrap();
+        assert!(app_zero.buffers[zero_rust].messages.is_empty());
+        assert!(app_zero.find_buffer("libera", "bob").is_none());
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }

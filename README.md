@@ -30,6 +30,8 @@ The resulting binary will be located at `target/release/ronf`.
 ```toml
 default_nickname = "irc_user"
 show_join_part = true
+enable_logging = true
+history_limit = 100
 
 [servers.libera]
 server = "irc.libera.chat"
@@ -44,10 +46,23 @@ channels = [
 server = "irc.oftc.net"
 port = 6697
 use_tls = true
+history_limit = 200
 channels = [
     "#kernelnewbies",
 ]
 ```
+
+### Chat History & Logging
+
+By default (`enable_logging = true`), `ronf` saves channel and direct message
+conversations under `$XDG_DATA_HOME/ronf/logs` (or
+`~/.local/share/ronf/logs`, overridable via `log_dir`).
+
+At startup, `ronf` restores past direct message buffers and loads the last
+`history_limit` messages (default: `100`, configurable globally or per server;
+set `0` to disable) into each buffer. Scrolling up with `PgUp` past the top of
+the loaded messages dynamically loads older batches of `history_limit` messages
+from disk.
 
 ## Keybindings & Commands
 
@@ -60,7 +75,8 @@ channels = [
 
 ### Scrolling
 
-- `PgUp` / `PgDn`: Scroll chat history up / down
+- `PgUp` / `PgDn`: Scroll chat history up / down (loads older logged messages
+  on demand when reaching the top)
 - `Alt+PgUp` / `Alt+PgDn`: Scroll right-hand Users list up / down
 - `Esc`: Snap chat scrollback back to latest messages
 

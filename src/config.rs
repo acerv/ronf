@@ -11,12 +11,14 @@ use irc::client::prelude::Config as IrcConfig;
 use serde::Deserialize;
 
 pub const DEFAULT_GENERIC_NICK: &str = "irc_user";
+pub const DEFAULT_HISTORY_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub default_nickname: Option<String>,
     pub enable_logging: Option<bool>,
     pub log_dir: Option<String>,
+    pub history_limit: Option<usize>,
     pub show_join_part: Option<bool>,
     pub servers: BTreeMap<String, ServerConfig>,
 }
@@ -34,6 +36,7 @@ pub struct ServerConfig {
     pub nick_password: Option<String>,
     pub nick_password_command: Option<String>,
     pub client_cert_path: Option<String>,
+    pub history_limit: Option<usize>,
     pub show_join_part: Option<bool>,
     pub enabled: Option<bool>,
 }
@@ -66,6 +69,12 @@ impl ServerConfig {
 
     pub fn effective_show_join_part(&self, global_default: Option<bool>) -> bool {
         self.show_join_part.or(global_default).unwrap_or(true)
+    }
+
+    pub fn effective_history_limit(&self, global_default: Option<usize>) -> usize {
+        self.history_limit
+            .or(global_default)
+            .unwrap_or(DEFAULT_HISTORY_LIMIT)
     }
 
     pub fn effective_port(&self) -> u16 {
@@ -183,12 +192,23 @@ impl AppConfig {
     }
 
     pub fn effective_log_dir(&self) -> Option<PathBuf> {
-        if !self.enable_logging.unwrap_or(false) {
+        if !self.enable_logging.unwrap_or(true) {
             return None;
         }
         if let Some(dir) = &self.log_dir {
             return Some(PathBuf::from(dir));
         }
+        #[cfg(test)]
+        {
+            None
+        }
+        #[cfg(not(test))]
+        {
+            Self::default_log_dir()
+        }
+    }
+
+    pub fn default_log_dir() -> Option<PathBuf> {
         if let Ok(xdg_data) = env::var("XDG_DATA_HOME") {
             if !xdg_data.trim().is_empty() {
                 return Some(PathBuf::from(xdg_data).join("ronf").join("logs"));
@@ -347,5 +367,67 @@ mod tests {
         assert_eq!(cfg.show_join_part, Some(false));
         assert!(!cfg.servers["libera"].effective_show_join_part(cfg.show_join_part));
         assert!(cfg.servers["oftc"].effective_show_join_part(cfg.show_join_part));
+    }
+
+    #[test]
+    fn resolves_effective_history_limit_and_logging_defaults() {
+        let toml = r##"
+            default_nickname = "irc_user"
+            log_dir = "/tmp/ronf_logs"
+
+            [servers.libera]
+            server = "irc.libera.chat"
+
+            [servers.oftc]
+            server = "irc.oftc.net"
+            history_limit = 250
+
+            [servers.silent]
+            server = "irc.example.org"
+            history_limit = 0
+        "##;
+
+        let cfg = AppConfig::from_toml_str(toml).expect("valid config");
+        assert_eq!(
+            cfg.effective_log_dir(),
+            Some(PathBuf::from("/tmp/ronf_logs"))
+        );
+        assert_eq!(
+            cfg.servers["libera"].effective_history_limit(cfg.history_limit),
+            DEFAULT_HISTORY_LIMIT
+        );
+        assert_eq!(
+            cfg.servers["oftc"].effective_history_limit(cfg.history_limit),
+            250
+        );
+        assert_eq!(
+            cfg.servers["silent"].effective_history_limit(cfg.history_limit),
+            0
+        );
+
+        let global_override_toml = r##"
+            default_nickname = "irc_user"
+            enable_logging = false
+            log_dir = "/tmp/ronf_logs"
+            history_limit = 50
+
+            [servers.libera]
+            server = "irc.libera.chat"
+
+            [servers.oftc]
+            server = "irc.oftc.net"
+            history_limit = 10
+        "##;
+
+        let cfg2 = AppConfig::from_toml_str(global_override_toml).expect("valid config");
+        assert_eq!(cfg2.effective_log_dir(), None);
+        assert_eq!(
+            cfg2.servers["libera"].effective_history_limit(cfg2.history_limit),
+            50
+        );
+        assert_eq!(
+            cfg2.servers["oftc"].effective_history_limit(cfg2.history_limit),
+            10
+        );
     }
 }

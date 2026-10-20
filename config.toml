@@ -5,6 +5,12 @@
 default_nickname = "irc_user"
 # Controls whether JOIN, PART, and QUIT notices appear in chat (default: true)
 show_join_part = true
+# Controls whether chat logs are saved and loaded on startup (default: true)
+enable_logging = true
+# Number of past messages loaded at startup and per PgUp batch (default: 100)
+history_limit = 100
+# Optional custom directory for chat logs (default: ~/.local/share/ronf/logs)
+# log_dir = "/path/to/logs"
 
 [servers.libera]
 server = "irc.libera.chat"
