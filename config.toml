@@ -16,5 +16,20 @@ history_limit = 100
 server = "irc.libera.chat"
 port = 6697
 use_tls = true
-channels = ["#linux", "#rust"]
+channels = [
+	"#linux",
+	"#ltp",
+	"#ai",
+	"#c",
+	"##rust",
+	"#archlinux",
+]
 # password = "optional-password"
+
+[servers.oftc]
+server = "irc.oftc.net"
+port = 6697
+use_tls = true
+channels = [
+	"#kernelnewbies",
+]
