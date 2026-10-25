@@ -408,14 +408,14 @@ fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
     let prompt_width = prompt.chars().count();
 
     let avail_width = (area.width as usize).saturating_sub(prompt_width);
-    let cursor_chars = app.input[..app.cursor_pos].chars().count();
+    let cursor_chars = app.input.text[..app.input.cursor_pos].chars().count();
     let horizontal_scroll = if avail_width > 0 && cursor_chars >= avail_width {
         cursor_chars - avail_width + 1
     } else {
         0
     };
 
-    let visible_input: String = app.input.chars().skip(horizontal_scroll).collect();
+    let visible_input: String = app.input.text.chars().skip(horizontal_scroll).collect();
     let line = Line::from(vec![
         Span::styled(
             prompt,

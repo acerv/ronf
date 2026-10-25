@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -581,6 +581,210 @@ pub struct TabCompletionState {
     pub index: usize,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct InputState {
+    pub text: String,
+    pub cursor_pos: usize,
+    pub history: Vec<String>,
+    pub history_index: Option<usize>,
+    pub saved_draft: String,
+    pub tab_state: Option<TabCompletionState>,
+}
+
+impl InputState {
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor_pos = self.text.len();
+    }
+
+    pub fn cancel(&mut self) {
+        self.text.clear();
+        self.cursor_pos = 0;
+        self.history_index = None;
+        self.saved_draft.clear();
+        self.tab_state = None;
+    }
+
+    pub fn clear_line(&mut self) {
+        self.text.clear();
+        self.cursor_pos = 0;
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor_pos = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor_pos = self.text.len();
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos = prev_char_boundary(&self.text, self.cursor_pos);
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor_pos < self.text.len() {
+            self.cursor_pos = next_char_boundary(&self.text, self.cursor_pos);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor_pos > 0 {
+            let prev = prev_char_boundary(&self.text, self.cursor_pos);
+            self.text.replace_range(prev..self.cursor_pos, "");
+            self.cursor_pos = prev;
+        }
+    }
+
+    pub fn delete_forward(&mut self) {
+        if self.cursor_pos < self.text.len() {
+            let next = next_char_boundary(&self.text, self.cursor_pos);
+            self.text.replace_range(self.cursor_pos..next, "");
+        }
+    }
+
+    pub fn insert_char(&mut self, ch: char) {
+        self.text.insert(self.cursor_pos, ch);
+        self.cursor_pos += ch.len_utf8();
+    }
+
+    pub fn delete_word_backwards(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let before = &self.text[..self.cursor_pos];
+        let trimmed_ws = before.trim_end_matches(char::is_whitespace);
+        let word_start = trimmed_ws
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        self.text.replace_range(word_start..self.cursor_pos, "");
+        self.cursor_pos = word_start;
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next_idx = match self.history_index {
+            None => {
+                self.saved_draft = self.text.clone();
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.history_index = Some(next_idx);
+        self.set_text(self.history[next_idx].clone());
+    }
+
+    pub fn history_next(&mut self) {
+        let Some(idx) = self.history_index else {
+            return;
+        };
+        if idx + 1 < self.history.len() {
+            let next_idx = idx + 1;
+            self.history_index = Some(next_idx);
+            self.set_text(self.history[next_idx].clone());
+        } else {
+            self.history_index = None;
+            let draft = std::mem::take(&mut self.saved_draft);
+            self.set_text(draft);
+        }
+    }
+
+    pub fn complete_tab(&mut self, users: &[String], slash_commands: &[&str]) {
+        if let Some(mut state) = self.tab_state.take() {
+            if !state.candidates.is_empty() {
+                state.index = (state.index + 1) % state.candidates.len();
+                let replacement = &state.candidates[state.index];
+                let end = state.replace_start + state.replace_len;
+                self.text
+                    .replace_range(state.replace_start..end, replacement);
+                state.replace_len = replacement.len();
+                self.cursor_pos = state.replace_start + state.replace_len;
+                self.tab_state = Some(state);
+            }
+            return;
+        }
+
+        let before_cursor = &self.text[..self.cursor_pos];
+        let token_start = before_cursor
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let token = &before_cursor[token_start..];
+        if token.is_empty() {
+            return;
+        }
+
+        let candidates: Vec<String> = if token_start == 0 && token.starts_with('/') {
+            let lower = token.to_ascii_lowercase();
+            slash_commands
+                .iter()
+                .filter(|cmd| cmd.starts_with(&lower))
+                .map(|cmd| format!("{cmd} "))
+                .collect()
+        } else {
+            let lower = token.to_ascii_lowercase();
+            let suffix = if token_start == 0 { ": " } else { " " };
+            users
+                .iter()
+                .map(|u| strip_user_prefix(u).1)
+                .filter(|nick| nick.to_ascii_lowercase().starts_with(&lower))
+                .map(|nick| format!("{nick}{suffix}"))
+                .collect()
+        };
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let replacement = candidates[0].clone();
+        self.text
+            .replace_range(token_start..self.cursor_pos, &replacement);
+        let replace_len = replacement.len();
+        self.cursor_pos = token_start + replace_len;
+        self.tab_state = Some(TabCompletionState {
+            replace_start: token_start,
+            replace_len,
+            candidates,
+            index: 0,
+        });
+    }
+
+    pub fn take_submitted(&mut self) -> Option<String> {
+        let line = std::mem::take(&mut self.text);
+        self.cursor_pos = 0;
+        self.history_index = None;
+        self.saved_draft.clear();
+
+        if line.trim().is_empty() {
+            return None;
+        }
+
+        if self.history.last() != Some(&line) {
+            self.history.push(line.clone());
+        }
+
+        Some(line)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerState {
+    pub nick: String,
+    pub show_join_part: bool,
+    pub history_limit: usize,
+    pub sender: Option<Sender>,
+}
+
 #[derive(Debug)]
 pub enum ServerEvent {
     Connected {
@@ -600,17 +804,9 @@ pub enum ServerEvent {
 pub struct App {
     pub buffers: Vec<Buffer>,
     pub active_buffer: usize,
-    pub nicks: BTreeMap<String, String>,
-    pub show_join_part: BTreeMap<String, bool>,
-    pub history_limits: BTreeMap<String, usize>,
+    pub servers: HashMap<String, ServerState>,
     pub ignored_nicks: BTreeSet<String>,
-    pub senders: HashMap<String, Sender>,
-    pub input: String,
-    pub cursor_pos: usize,
-    pub input_history: Vec<String>,
-    pub history_index: Option<usize>,
-    pub saved_draft: String,
-    pub tab_state: Option<TabCompletionState>,
+    pub input: InputState,
     pub log_dir: Option<PathBuf>,
     pub show_help: bool,
     pub help_scroll: usize,
@@ -620,9 +816,7 @@ pub struct App {
 impl App {
     pub fn from_config(config: &AppConfig) -> Self {
         let mut buffers = Vec::new();
-        let mut nicks = BTreeMap::new();
-        let mut show_join_part = BTreeMap::new();
-        let mut history_limits = BTreeMap::new();
+        let mut servers = HashMap::new();
         let log_dir = config.effective_log_dir();
 
         for (server_id, srv) in config.enabled_servers() {
@@ -630,12 +824,15 @@ impl App {
                 .effective_nickname(config.default_nickname.as_deref())
                 .unwrap_or_else(|_| DEFAULT_GENERIC_NICK.to_string());
             let limit = srv.effective_history_limit(config.history_limit);
-            nicks.insert(server_id.clone(), nick);
-            show_join_part.insert(
+            servers.insert(
                 server_id.clone(),
-                srv.effective_show_join_part(config.show_join_part),
+                ServerState {
+                    nick,
+                    show_join_part: srv.effective_show_join_part(config.show_join_part),
+                    history_limit: limit,
+                    sender: None,
+                },
             );
-            history_limits.insert(server_id.clone(), limit);
 
             let mut srv_buf = Buffer::new(server_id.clone(), server_id.clone(), BufferKind::Server);
             srv_buf.push_line(
@@ -674,17 +871,9 @@ impl App {
         Self {
             buffers,
             active_buffer: 0,
-            nicks,
-            show_join_part,
-            history_limits,
+            servers,
             ignored_nicks: BTreeSet::new(),
-            senders: HashMap::new(),
-            input: String::new(),
-            cursor_pos: 0,
-            input_history: Vec::new(),
-            history_index: None,
-            saved_draft: String::new(),
-            tab_state: None,
+            input: InputState::default(),
             log_dir,
             show_help: false,
             help_scroll: 0,
@@ -693,10 +882,57 @@ impl App {
     }
 
     pub fn history_limit_for(&self, server_id: &str) -> usize {
-        self.history_limits
+        self.servers
             .get(server_id)
-            .copied()
+            .map(|s| s.history_limit)
             .unwrap_or(DEFAULT_HISTORY_LIMIT)
+    }
+
+    pub fn should_show_join_part(&self, server_id: &str) -> bool {
+        self.servers
+            .get(server_id)
+            .map(|s| s.show_join_part)
+            .unwrap_or(true)
+    }
+
+    pub fn sender_for(&self, server_id: &str) -> Option<&Sender> {
+        self.servers.get(server_id).and_then(|s| s.sender.as_ref())
+    }
+
+    fn set_nick(&mut self, server_id: &str, new_nick: String) -> String {
+        if let Some(srv) = self.servers.get_mut(server_id) {
+            std::mem::replace(&mut srv.nick, new_nick)
+        } else {
+            self.servers.insert(
+                server_id.to_string(),
+                ServerState {
+                    nick: new_nick,
+                    show_join_part: true,
+                    history_limit: DEFAULT_HISTORY_LIMIT,
+                    sender: None,
+                },
+            );
+            String::new()
+        }
+    }
+
+    fn set_sender(&mut self, server_id: &str, sender: Option<Sender>) -> Option<Sender> {
+        if let Some(srv) = self.servers.get_mut(server_id) {
+            std::mem::replace(&mut srv.sender, sender)
+        } else {
+            if let Some(s) = sender {
+                self.servers.insert(
+                    server_id.to_string(),
+                    ServerState {
+                        nick: DEFAULT_GENERIC_NICK.to_string(),
+                        show_join_part: true,
+                        history_limit: DEFAULT_HISTORY_LIMIT,
+                        sender: Some(s),
+                    },
+                );
+            }
+            None
+        }
     }
 
     pub fn active_buf(&self) -> &Buffer {
@@ -712,9 +948,9 @@ impl App {
     }
 
     pub fn nick_for(&self, server_id: &str) -> &str {
-        self.nicks
+        self.servers
             .get(server_id)
-            .map(String::as_str)
+            .map(|s| s.nick.as_str())
             .unwrap_or(DEFAULT_GENERIC_NICK)
     }
 
@@ -785,7 +1021,7 @@ impl App {
     }
 
     pub fn join_server_channels(&self, server_id: &str) {
-        let Some(sender) = self.senders.get(server_id) else {
+        let Some(sender) = self.sender_for(server_id) else {
             return;
         };
         for buf in &self.buffers {
@@ -847,7 +1083,7 @@ impl App {
         }
 
         if key.code != KeyCode::Tab {
-            self.tab_state = None;
+            self.input.tab_state = None;
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -856,7 +1092,7 @@ impl App {
         if ctrl {
             match key.code {
                 KeyCode::Char('c') => {
-                    self.cancel_input_line();
+                    self.input.cancel();
                     return;
                 }
                 KeyCode::Char('q') => {
@@ -872,20 +1108,19 @@ impl App {
                     return;
                 }
                 KeyCode::Char('a') => {
-                    self.cursor_pos = 0;
+                    self.input.move_home();
                     return;
                 }
                 KeyCode::Char('e') => {
-                    self.cursor_pos = self.input.len();
+                    self.input.move_end();
                     return;
                 }
                 KeyCode::Char('u') => {
-                    self.input.clear();
-                    self.cursor_pos = 0;
+                    self.input.clear_line();
                     return;
                 }
                 KeyCode::Char('w') => {
-                    self.delete_word_backwards();
+                    self.input.delete_word_backwards();
                     return;
                 }
                 _ => {}
@@ -928,35 +1163,19 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Tab => self.complete_tab(),
+            KeyCode::Tab => {
+                let users = &self.buffers[self.active_buffer].users;
+                self.input.complete_tab(users, SLASH_COMMANDS);
+            }
             KeyCode::Enter => self.submit_input(),
-            KeyCode::Up => self.history_prev(),
-            KeyCode::Down => self.history_next(),
-            KeyCode::Left => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos = prev_char_boundary(&self.input, self.cursor_pos);
-                }
-            }
-            KeyCode::Right => {
-                if self.cursor_pos < self.input.len() {
-                    self.cursor_pos = next_char_boundary(&self.input, self.cursor_pos);
-                }
-            }
-            KeyCode::Home => self.cursor_pos = 0,
-            KeyCode::End => self.cursor_pos = self.input.len(),
-            KeyCode::Backspace => {
-                if self.cursor_pos > 0 {
-                    let prev = prev_char_boundary(&self.input, self.cursor_pos);
-                    self.input.replace_range(prev..self.cursor_pos, "");
-                    self.cursor_pos = prev;
-                }
-            }
-            KeyCode::Delete => {
-                if self.cursor_pos < self.input.len() {
-                    let next = next_char_boundary(&self.input, self.cursor_pos);
-                    self.input.replace_range(self.cursor_pos..next, "");
-                }
-            }
+            KeyCode::Up => self.input.history_prev(),
+            KeyCode::Down => self.input.history_next(),
+            KeyCode::Left => self.input.move_left(),
+            KeyCode::Right => self.input.move_right(),
+            KeyCode::Home => self.input.move_home(),
+            KeyCode::End => self.input.move_end(),
+            KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Delete => self.input.delete_forward(),
             KeyCode::PageUp => {
                 let server_id = self.active_server_id();
                 let limit = self.history_limit_for(&server_id);
@@ -977,10 +1196,7 @@ impl App {
             KeyCode::Esc => {
                 self.active_buf_mut().scroll_offset = 0;
             }
-            KeyCode::Char(ch) => {
-                self.input.insert(self.cursor_pos, ch);
-                self.cursor_pos += ch.len_utf8();
-            }
+            KeyCode::Char(ch) => self.input.insert_char(ch),
             _ => {}
         }
     }
@@ -1029,138 +1245,10 @@ impl App {
         }
     }
 
-    pub fn cancel_input_line(&mut self) {
-        self.input.clear();
-        self.cursor_pos = 0;
-        self.history_index = None;
-        self.saved_draft.clear();
-        self.tab_state = None;
-    }
-
-    pub fn delete_word_backwards(&mut self) {
-        if self.cursor_pos == 0 {
-            return;
-        }
-        let before = &self.input[..self.cursor_pos];
-        let trimmed_ws = before.trim_end_matches(char::is_whitespace);
-        let word_start = trimmed_ws
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        self.input.replace_range(word_start..self.cursor_pos, "");
-        self.cursor_pos = word_start;
-    }
-
-    pub fn history_prev(&mut self) {
-        if self.input_history.is_empty() {
-            return;
-        }
-        let next_idx = match self.history_index {
-            None => {
-                self.saved_draft = self.input.clone();
-                self.input_history.len() - 1
-            }
-            Some(0) => 0,
-            Some(i) => i - 1,
-        };
-        self.history_index = Some(next_idx);
-        self.input = self.input_history[next_idx].clone();
-        self.cursor_pos = self.input.len();
-    }
-
-    pub fn history_next(&mut self) {
-        let Some(idx) = self.history_index else {
-            return;
-        };
-        if idx + 1 < self.input_history.len() {
-            let next_idx = idx + 1;
-            self.history_index = Some(next_idx);
-            self.input = self.input_history[next_idx].clone();
-        } else {
-            self.history_index = None;
-            self.input = std::mem::take(&mut self.saved_draft);
-        }
-        self.cursor_pos = self.input.len();
-    }
-
-    pub fn complete_tab(&mut self) {
-        if let Some(mut state) = self.tab_state.take() {
-            if !state.candidates.is_empty() {
-                state.index = (state.index + 1) % state.candidates.len();
-                let replacement = &state.candidates[state.index];
-                let end = state.replace_start + state.replace_len;
-                self.input
-                    .replace_range(state.replace_start..end, replacement);
-                state.replace_len = replacement.len();
-                self.cursor_pos = state.replace_start + state.replace_len;
-                self.tab_state = Some(state);
-            }
-            return;
-        }
-
-        let before_cursor = &self.input[..self.cursor_pos];
-        let token_start = before_cursor
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        let token = &before_cursor[token_start..];
-        if token.is_empty() {
-            return;
-        }
-
-        let candidates: Vec<String> = if token_start == 0 && token.starts_with('/') {
-            let lower = token.to_ascii_lowercase();
-            SLASH_COMMANDS
-                .iter()
-                .filter(|cmd| cmd.starts_with(&lower))
-                .map(|cmd| format!("{cmd} "))
-                .collect()
-        } else {
-            let lower = token.to_ascii_lowercase();
-            let suffix = if token_start == 0 { ": " } else { " " };
-            self.active_buf()
-                .users
-                .iter()
-                .map(|u| strip_user_prefix(u).1)
-                .filter(|nick| nick.to_ascii_lowercase().starts_with(&lower))
-                .map(|nick| format!("{nick}{suffix}"))
-                .collect()
-        };
-
-        if candidates.is_empty() {
-            return;
-        }
-
-        let replacement = candidates[0].clone();
-        self.input
-            .replace_range(token_start..self.cursor_pos, &replacement);
-        let replace_len = replacement.len();
-        self.cursor_pos = token_start + replace_len;
-        self.tab_state = Some(TabCompletionState {
-            replace_start: token_start,
-            replace_len,
-            candidates,
-            index: 0,
-        });
-    }
-
     pub fn submit_input(&mut self) {
-        let line = std::mem::take(&mut self.input);
-        self.cursor_pos = 0;
-        self.history_index = None;
-        self.saved_draft.clear();
-
-        if line.trim().is_empty() {
+        let Some(line) = self.input.take_submitted() else {
             return;
-        }
-
-        if self.input_history.last() != Some(&line) {
-            self.input_history.push(line.clone());
-        }
+        };
 
         let Some(cmd) = parse_user_command(&line) else {
             self.push_to_buffer(
@@ -1187,7 +1275,7 @@ impl App {
                 self.help_scroll = 0;
             }
             UserCommand::Join(channel) => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send_join(&channel);
                 }
                 let idx = self.ensure_buffer(&server_id, &channel, BufferKind::Channel);
@@ -1203,7 +1291,7 @@ impl App {
                     return;
                 }
                 let chan = self.active_buf().name.clone();
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::PART(chan.clone(), reason));
                 }
                 let buf = self.active_buf_mut();
@@ -1216,7 +1304,7 @@ impl App {
                 );
             }
             UserCommand::Msg { target, text } => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send_privmsg(&target, &text);
                 }
                 let kind = if target.starts_with('#') || target.starts_with('&') {
@@ -1231,7 +1319,7 @@ impl App {
             UserCommand::Query { target, text } => {
                 let idx = self.ensure_buffer(&server_id, &target, BufferKind::DirectMessage);
                 if let Some(msg_text) = text {
-                    if let Some(sender) = self.senders.get(&server_id) {
+                    if let Some(sender) = self.sender_for(&server_id) {
                         let _ = sender.send_privmsg(&target, &msg_text);
                     }
                     self.push_to_buffer(
@@ -1242,13 +1330,10 @@ impl App {
                 self.select_buffer(idx);
             }
             UserCommand::Nick(new_nick) => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::NICK(new_nick.clone()));
                 }
-                let old_nick = self
-                    .nicks
-                    .insert(server_id.clone(), new_nick.clone())
-                    .unwrap_or_default();
+                let old_nick = self.set_nick(&server_id, new_nick.clone());
                 for buf in &mut self.buffers {
                     if buf.server_id.eq_ignore_ascii_case(&server_id) {
                         buf.rename_user(&old_nick, &new_nick);
@@ -1287,10 +1372,10 @@ impl App {
                     return;
                 }
                 let target = self.active_buf().name.clone();
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let ctcp = format!("\x01ACTION {action}\x01");
                     if sender.send_privmsg(&target, &ctcp).is_err() {
-                        self.senders.remove(&server_id);
+                        self.set_sender(&server_id, None);
                         self.push_to_buffer(
                             self.active_buffer,
                             ChatLine::new(
@@ -1332,12 +1417,12 @@ impl App {
                         );
                     }
                 }
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::TOPIC(chan, new_topic));
                 }
             }
             UserCommand::Whois(target) => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::WHOIS(None, target.clone()));
                 }
                 self.push_to_buffer(
@@ -1362,7 +1447,7 @@ impl App {
                     return;
                 }
                 let chan = self.active_buf().name.clone();
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::KICK(chan, nick, reason));
                 }
             }
@@ -1384,7 +1469,7 @@ impl App {
                         return;
                     }
                 };
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::INVITE(nick.clone(), target_chan.clone()));
                 }
                 self.push_to_buffer(
@@ -1420,7 +1505,7 @@ impl App {
                     }
                     None => active_nick,
                 };
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let mut raw_args = vec![target_name.clone()];
                     raw_args.extend(args.split_whitespace().map(str::to_string));
                     let _ = sender.send(Command::Raw("MODE".to_string(), raw_args));
@@ -1435,7 +1520,7 @@ impl App {
                 );
             }
             UserCommand::Away(reason) => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::AWAY(reason.clone()));
                 }
                 let text = match reason {
@@ -1448,12 +1533,12 @@ impl App {
                 );
             }
             UserCommand::Motd => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::MOTD(None));
                 }
             }
             UserCommand::List(filter) => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::LIST(filter, None));
                 }
                 self.push_to_buffer(
@@ -1486,7 +1571,7 @@ impl App {
                 }
             }
             UserCommand::Reconnect => {
-                if let Some(sender) = self.senders.remove(&server_id) {
+                if let Some(sender) = self.set_sender(&server_id, None) {
                     let _ = sender.send(Command::QUIT(Some("Reconnecting...".to_string())));
                 }
                 self.push_to_buffer(
@@ -1565,7 +1650,7 @@ impl App {
                 }
             }
             UserCommand::Raw(raw_cmd) => {
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
                         let _ = sender.send(msg);
                     } else {
@@ -1597,7 +1682,7 @@ impl App {
                 }
                 if self.active_buf().kind == BufferKind::Channel {
                     let chan = self.active_buf().name.clone();
-                    if let Some(sender) = self.senders.get(&server_id) {
+                    if let Some(sender) = self.sender_for(&server_id) {
                         let _ = sender.send(Command::PART(chan, None));
                     }
                 }
@@ -1637,9 +1722,9 @@ impl App {
                     return;
                 }
                 let target = self.active_buf().name.clone();
-                if let Some(sender) = self.senders.get(&server_id) {
+                if let Some(sender) = self.sender_for(&server_id) {
                     if sender.send_privmsg(&target, &text).is_err() {
-                        self.senders.remove(&server_id);
+                        self.set_sender(&server_id, None);
                         self.push_to_buffer(
                             self.active_buffer,
                             ChatLine::new(
@@ -1661,8 +1746,10 @@ impl App {
 
     pub fn quit_all(&mut self, reason: Option<String>) {
         let quit_msg = reason.or_else(|| Some("ronf shutting down".to_string()));
-        for sender in self.senders.values() {
-            let _ = sender.send(Command::QUIT(quit_msg.clone()));
+        for srv in self.servers.values() {
+            if let Some(sender) = &srv.sender {
+                let _ = sender.send(Command::QUIT(quit_msg.clone()));
+            }
         }
         self.should_quit = true;
     }
@@ -1675,7 +1762,7 @@ impl App {
                         buf.pending_names.clear();
                     }
                 }
-                self.senders.insert(server_id.clone(), sender);
+                self.set_sender(&server_id, Some(sender));
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_to_buffer(
                         idx,
@@ -1688,7 +1775,7 @@ impl App {
                 }
             }
             ServerEvent::Error { server_id, error } => {
-                self.senders.remove(&server_id);
+                self.set_sender(&server_id, None);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_to_buffer(idx, ChatLine::new(None, error, LineKind::Error));
                 }
@@ -1781,12 +1868,7 @@ impl App {
                         self.buffers[idx].parted = false;
                     }
                     self.buffers[idx].add_user(&nick);
-                    let should_show = self
-                        .show_join_part
-                        .get(server_id)
-                        .copied()
-                        .unwrap_or(true);
-                    if should_show {
+                    if self.should_show_join_part(server_id) {
                         self.push_to_buffer(
                             idx,
                             ChatLine::new(
@@ -1802,12 +1884,7 @@ impl App {
                 if let Some(idx) = self.find_buffer(server_id, &chan) {
                     if let Some(nick) = sender_nick {
                         self.buffers[idx].remove_user(&nick);
-                        let should_show = self
-                            .show_join_part
-                            .get(server_id)
-                            .copied()
-                            .unwrap_or(true);
-                        if should_show {
+                        if self.should_show_join_part(server_id) {
                             let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
                             self.push_to_buffer(
                                 idx,
@@ -1838,11 +1915,7 @@ impl App {
             }
             Command::QUIT(reason) => {
                 if let Some(nick) = sender_nick {
-                    let should_show = self
-                        .show_join_part
-                        .get(server_id)
-                        .copied()
-                        .unwrap_or(true);
+                    let should_show = self.should_show_join_part(server_id);
                     let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
                     let affected: Vec<usize> = self
                         .buffers
@@ -1875,7 +1948,7 @@ impl App {
             Command::NICK(new_nick) => {
                 if let Some(old_nick) = sender_nick {
                     if old_nick.eq_ignore_ascii_case(&my_nick) {
-                        self.nicks.insert(server_id.to_string(), new_nick.clone());
+                        self.set_nick(server_id, new_nick.clone());
                     }
                     let affected: Vec<usize> = self
                         .buffers
@@ -2174,8 +2247,8 @@ impl App {
             Response::ERR_NICKNAMEINUSE => {
                 let current = self.nick_for(server_id).to_string();
                 let fallback = format!("{current}_");
-                self.nicks.insert(server_id.to_string(), fallback.clone());
-                if let Some(sender) = self.senders.get(server_id) {
+                self.set_nick(server_id, fallback.clone());
+                if let Some(sender) = self.sender_for(server_id) {
                     let _ = sender.send(Command::NICK(fallback.clone()));
                 }
                 let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
@@ -2690,35 +2763,31 @@ mod tests {
         app.buffers[rust_idx].users = vec!["@ferris".into(), "alice".into(), "alex".into()];
 
         // Start of line nick completion -> adds ": " and cycles on second Tab
-        app.input = "al".to_string();
-        app.cursor_pos = 2;
+        app.input.set_text("al");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input, "alice: ");
+        assert_eq!(app.input.text, "alice: ");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input, "alex: ");
+        assert_eq!(app.input.text, "alex: ");
 
         // Mid-line nick completion -> adds " "
         app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        app.input = "hello fe".to_string();
-        app.cursor_pos = app.input.len();
+        app.input.set_text("hello fe");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input, "hello ferris ");
+        assert_eq!(app.input.text, "hello ferris ");
 
         // Slash command completion
         app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        app.input = "/j".to_string();
-        app.cursor_pos = 2;
+        app.input.set_text("/j");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input, "/join ");
+        assert_eq!(app.input.text, "/join ");
 
         // Multi-byte Unicode whitespace (U+00A0 NO-BREAK SPACE) does not panic on Tab or Ctrl+W
         app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        app.input = "ab\u{00a0}al".to_string();
-        app.cursor_pos = app.input.len();
+        app.input.set_text("ab\u{00a0}al");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input, "ab\u{00a0}alice ");
+        assert_eq!(app.input.text, "ab\u{00a0}alice ");
         app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert_eq!(app.input, "ab\u{00a0}");
+        assert_eq!(app.input.text, "ab\u{00a0}");
     }
 
     #[test]
@@ -2727,24 +2796,21 @@ mod tests {
         let rust_idx = app.find_buffer("libera", "#rust").unwrap();
         app.select_buffer(rust_idx);
 
-        app.input = "first message".into();
-        app.cursor_pos = app.input.len();
+        app.input.set_text("first message");
         app.submit_input();
 
-        app.input = "second message".into();
-        app.cursor_pos = app.input.len();
+        app.input.set_text("second message");
         app.submit_input();
 
-        app.input = "draft".into();
-        app.cursor_pos = app.input.len();
+        app.input.set_text("draft");
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(app.input, "second message");
+        assert_eq!(app.input.text, "second message");
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(app.input, "first message");
+        assert_eq!(app.input.text, "first message");
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.input, "second message");
+        assert_eq!(app.input.text, "second message");
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.input, "draft");
+        assert_eq!(app.input.text, "draft");
 
         // Mark #linux unread and press Alt+A
         let linux_idx = app.find_buffer("libera", "#linux").unwrap();
@@ -2759,8 +2825,7 @@ mod tests {
         let mut app = test_app();
         assert!(!app.show_help);
 
-        app.input = "/help".into();
-        app.cursor_pos = app.input.len();
+        app.input.set_text("/help");
         app.submit_input();
         assert!(app.show_help);
         assert_eq!(app.help_scroll, 0);
@@ -2819,7 +2884,7 @@ mod tests {
     #[test]
     fn appends_underscore_on_err_nicknameinuse() {
         let mut app = test_app();
-        assert_eq!(app.nicks.get("libera").map(String::as_str), Some("irc_user"));
+        assert_eq!(app.nick_for("libera"), "irc_user");
 
         app.handle_irc_message(
             "libera",
@@ -2833,7 +2898,7 @@ mod tests {
             },
         );
 
-        assert_eq!(app.nicks.get("libera").map(String::as_str), Some("irc_user_"));
+        assert_eq!(app.nick_for("libera"), "irc_user_");
     }
 
     #[test]
