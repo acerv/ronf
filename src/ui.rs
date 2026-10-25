@@ -246,57 +246,37 @@ pub fn wrapped_line_height(line: &Line, width: usize) -> usize {
     let mut chars = text.chars().peekable();
 
     while let Some(&ch) = chars.peek() {
-        if ch.is_whitespace() {
-            let mut ws_len = 0usize;
-            while let Some(&c) = chars.peek() {
-                if c.is_whitespace() {
-                    ws_len += char_display_width(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if col + ws_len <= width {
-                col += ws_len;
+        let is_ws = ch.is_whitespace();
+        let mut seg_len = 0usize;
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() == is_ws {
+                seg_len += char_display_width(c);
+                chars.next();
             } else {
-                let rem = (col + ws_len) - width;
+                break;
+            }
+        }
+
+        if is_ws {
+            if col + seg_len <= width {
+                col += seg_len;
+            } else {
+                let rem = (col + seg_len) - width;
                 rows += 1 + rem / width;
                 col = rem % width;
             }
+        } else if col > 0 && col + seg_len <= width {
+            col += seg_len;
         } else {
-            let mut word_len = 0usize;
-            while let Some(&c) = chars.peek() {
-                if !c.is_whitespace() {
-                    word_len += char_display_width(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if col == 0 {
-                if word_len <= width {
-                    col = word_len;
-                } else {
-                    rows += (word_len - 1) / width;
-                    col = word_len % width;
-                    if col == 0 {
-                        col = width;
-                    }
-                }
-            } else if col + word_len <= width {
-                col += word_len;
-            } else {
+            if col > 0 {
                 rows += 1;
-                if word_len <= width {
-                    col = word_len;
-                } else {
-                    rows += (word_len - 1) / width;
-                    col = word_len % width;
-                    if col == 0 {
-                        col = width;
-                    }
-                }
             }
+            rows += (seg_len.saturating_sub(1)) / width;
+            col = if seg_len == 0 {
+                0
+            } else {
+                (seg_len - 1) % width + 1
+            };
         }
     }
 
@@ -614,31 +594,14 @@ pub fn parse_irc_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
 
     while i < bytes.len() {
         match bytes[i] {
-            0x02 => {
+            0x02 | 0x1d | 0x1f => {
                 flush(&mut spans, &mut current_text, current_style);
-                if current_style.add_modifier.contains(Modifier::BOLD) {
-                    current_style = current_style.remove_modifier(Modifier::BOLD);
-                } else {
-                    current_style = current_style.add_modifier(Modifier::BOLD);
-                }
-                i += 1;
-            }
-            0x1d => {
-                flush(&mut spans, &mut current_text, current_style);
-                if current_style.add_modifier.contains(Modifier::ITALIC) {
-                    current_style = current_style.remove_modifier(Modifier::ITALIC);
-                } else {
-                    current_style = current_style.add_modifier(Modifier::ITALIC);
-                }
-                i += 1;
-            }
-            0x1f => {
-                flush(&mut spans, &mut current_text, current_style);
-                if current_style.add_modifier.contains(Modifier::UNDERLINED) {
-                    current_style = current_style.remove_modifier(Modifier::UNDERLINED);
-                } else {
-                    current_style = current_style.add_modifier(Modifier::UNDERLINED);
-                }
+                let modifier = match bytes[i] {
+                    0x02 => Modifier::BOLD,
+                    0x1d => Modifier::ITALIC,
+                    _ => Modifier::UNDERLINED,
+                };
+                current_style = toggle_modifier(current_style, modifier);
                 i += 1;
             }
             0x0f => {
@@ -697,26 +660,35 @@ fn parse_two_digit_color(bytes: &[u8]) -> (Option<u8>, usize) {
     }
 }
 
-fn mirc_color_to_ratatui(code: u8) -> Option<Color> {
-    match code {
-        0 => Some(Color::White),
-        1 => Some(Color::Black),
-        2 => Some(Color::Blue),
-        3 => Some(Color::Green),
-        4 => Some(Color::LightRed),
-        5 => Some(Color::Red),
-        6 => Some(Color::Magenta),
-        7 => Some(Color::Yellow),
-        8 => Some(Color::LightYellow),
-        9 => Some(Color::LightGreen),
-        10 => Some(Color::Cyan),
-        11 => Some(Color::LightCyan),
-        12 => Some(Color::LightBlue),
-        13 => Some(Color::LightMagenta),
-        14 => Some(Color::Gray),
-        15 => Some(Color::Gray),
-        _ => None,
+fn toggle_modifier(style: Style, modifier: Modifier) -> Style {
+    if style.add_modifier.contains(modifier) {
+        style.remove_modifier(modifier)
+    } else {
+        style.add_modifier(modifier)
     }
+}
+
+const MIRC_COLORS: [Color; 16] = [
+    Color::White,
+    Color::Black,
+    Color::Blue,
+    Color::Green,
+    Color::LightRed,
+    Color::Red,
+    Color::Magenta,
+    Color::Yellow,
+    Color::LightYellow,
+    Color::LightGreen,
+    Color::Cyan,
+    Color::LightCyan,
+    Color::LightBlue,
+    Color::LightMagenta,
+    Color::Gray,
+    Color::Gray,
+];
+
+fn mirc_color_to_ratatui(code: u8) -> Option<Color> {
+    MIRC_COLORS.get(code as usize).copied()
 }
 
 #[cfg(test)]
