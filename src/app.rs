@@ -141,15 +141,19 @@ impl Buffer {
         });
     }
 
+    fn find_user_mut(&mut self, nick: &str) -> Option<&mut String> {
+        let (_, target) = strip_user_prefix(nick);
+        self.users
+            .iter_mut()
+            .find(|u| strip_user_prefix(u).1.eq_ignore_ascii_case(target))
+    }
+
     pub fn add_user(&mut self, entry: &str) {
         let (_, new_nick) = strip_user_prefix(entry);
         if new_nick.is_empty() {
             return;
         }
-        if let Some(existing) = self.users.iter_mut().find(|u| {
-            let (_, n) = strip_user_prefix(u);
-            n.eq_ignore_ascii_case(new_nick)
-        }) {
+        if let Some(existing) = self.find_user_mut(new_nick) {
             *existing = entry.to_string();
         } else {
             self.users.push(entry.to_string());
@@ -160,10 +164,8 @@ impl Buffer {
     pub fn remove_user(&mut self, nick: &str) -> bool {
         let (_, target_nick) = strip_user_prefix(nick);
         let before = self.users.len();
-        self.users.retain(|u| {
-            let (_, n) = strip_user_prefix(u);
-            !n.eq_ignore_ascii_case(target_nick)
-        });
+        self.users
+            .retain(|u| !strip_user_prefix(u).1.eq_ignore_ascii_case(target_nick));
         before != self.users.len()
     }
 
@@ -187,47 +189,40 @@ impl Buffer {
     pub fn apply_channel_modes(&mut self, modes: &[Mode<ChannelMode>]) {
         let mut changed = false;
         for mode in modes {
-            match mode {
-                Mode::Plus(cm, Some(target)) => {
-                    if let Some(new_pref) = channel_mode_prefix(cm) {
-                        let (_, target_raw) = strip_user_prefix(target);
-                        if let Some(user) = self.users.iter_mut().find(|u| {
-                            let (_, n) = strip_user_prefix(u);
-                            n.eq_ignore_ascii_case(target_raw)
-                        }) {
-                            let (mut prefixes, raw) = extract_user_prefixes(user);
-                            if !prefixes.contains(new_pref) {
-                                prefixes.push(new_pref);
-                                *user = format!("{prefixes}{raw}");
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                Mode::Minus(cm, Some(target)) => {
-                    if let Some(rem_pref) = channel_mode_prefix(cm) {
-                        let (_, target_raw) = strip_user_prefix(target);
-                        if let Some(user) = self.users.iter_mut().find(|u| {
-                            let (_, n) = strip_user_prefix(u);
-                            n.eq_ignore_ascii_case(target_raw)
-                        }) {
-                            let (prefixes, raw) = extract_user_prefixes(user);
-                            if prefixes.contains(rem_pref) {
-                                let remaining: String =
-                                    prefixes.chars().filter(|&c| c != rem_pref).collect();
-                                *user = format!("{remaining}{raw}");
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                _ => {}
+            let (adding, cm, target) = match mode {
+                Mode::Plus(cm, Some(target)) => (true, cm, target),
+                Mode::Minus(cm, Some(target)) => (false, cm, target),
+                _ => continue,
+            };
+            let Some(pref) = channel_mode_prefix(cm) else {
+                continue;
+            };
+            let Some(user) = self.find_user_mut(target) else {
+                continue;
+            };
+            let (mut prefixes, raw) = extract_user_prefixes(user);
+            if adding && !prefixes.contains(pref) {
+                prefixes.push(pref);
+                *user = format!("{prefixes}{raw}");
+                changed = true;
+            } else if !adding && prefixes.contains(pref) {
+                prefixes.retain(|c| c != pref);
+                *user = format!("{prefixes}{raw}");
+                changed = true;
             }
         }
         if changed {
             self.sort_users();
         }
     }
+}
+
+pub fn is_channel_name(name: &str) -> bool {
+    name.starts_with(['#', '&'])
+}
+
+fn is_role_prefix(ch: char) -> bool {
+    matches!(ch, '~' | '&' | '@' | '%' | '+')
 }
 
 fn channel_mode_prefix(cm: &ChannelMode) -> Option<char> {
@@ -242,27 +237,19 @@ fn channel_mode_prefix(cm: &ChannelMode) -> Option<char> {
 }
 
 pub fn extract_user_prefixes(entry: &str) -> (String, &str) {
-    let mut prefs: Vec<char> = Vec::new();
-    let mut byte_offset = 0;
-
-    for ch in entry.chars() {
-        if matches!(ch, '~' | '&' | '@' | '%' | '+') {
-            byte_offset += ch.len_utf8();
-            if !prefs.contains(&ch) {
-                prefs.push(ch);
-            }
-        } else {
-            break;
-        }
-    }
-
+    let raw = entry.trim_start_matches(is_role_prefix);
+    let mut prefs: Vec<char> = entry[..entry.len() - raw.len()].chars().collect();
     prefs.sort_by_key(|&c| role_rank(Some(c)));
-    (prefs.into_iter().collect(), &entry[byte_offset..])
+    prefs.dedup();
+    (prefs.into_iter().collect(), raw)
 }
 
 pub fn strip_user_prefix(entry: &str) -> (Option<char>, &str) {
-    let (prefs, raw) = extract_user_prefixes(entry);
-    (prefs.chars().next(), raw)
+    let raw = entry.trim_start_matches(is_role_prefix);
+    let top = entry[..entry.len() - raw.len()]
+        .chars()
+        .min_by_key(|&c| role_rank(Some(c)));
+    (top, raw)
 }
 
 fn role_rank(prefix: Option<char>) -> u8 {
@@ -331,7 +318,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 None
             } else {
                 let chan = rest.split_whitespace().next().unwrap_or(rest);
-                let normalized = if chan.starts_with('#') || chan.starts_with('&') {
+                let normalized = if is_channel_name(chan) {
                     chan.to_string()
                 } else {
                     format!("#{chan}")
@@ -457,7 +444,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 let mut parts = rest.splitn(2, char::is_whitespace);
                 let first = parts.next().unwrap();
                 let rem = parts.next().map(str::trim).unwrap_or("");
-                if first.starts_with('#') || first.starts_with('&') {
+                if is_channel_name(first) {
                     Some(UserCommand::Mode {
                         target: Some(first.to_string()),
                         args: rem.to_string(),
@@ -1307,7 +1294,7 @@ impl App {
                 if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send_privmsg(&target, &text);
                 }
-                let kind = if target.starts_with('#') || target.starts_with('&') {
+                let kind = if is_channel_name(&target) {
                     BufferKind::Channel
                 } else {
                     BufferKind::DirectMessage
@@ -1796,7 +1783,7 @@ impl App {
         match msg.command {
             Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
             Command::PRIVMSG(target, text) => {
-                let is_channel = target.starts_with('#') || target.starts_with('&');
+                let is_channel = is_channel_name(&target);
                 let (buf_name, buf_kind) = if is_channel {
                     (target, BufferKind::Channel)
                 } else {
@@ -1851,7 +1838,7 @@ impl App {
                 }
             }
             Command::NOTICE(target, text) => {
-                let idx = if target.starts_with('#') || target.starts_with('&') {
+                let idx = if is_channel_name(&target) {
                     self.ensure_buffer(server_id, &target, BufferKind::Channel)
                 } else {
                     self.find_server_buffer(server_id).unwrap_or(0)
@@ -2493,7 +2480,7 @@ fn discover_dm_buffers(
                 return None;
             }
             let stem = path.file_stem()?.to_str()?.to_string();
-            if stem.is_empty() || stem.starts_with('#') || stem.starts_with('&') {
+            if stem.is_empty() || is_channel_name(&stem) {
                 return None;
             }
             let already_exists = existing.iter().any(|b| {
