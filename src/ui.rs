@@ -212,17 +212,16 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     let end = total_msgs.saturating_sub(buf.scroll_offset);
 
     let mut acc_rows = 0usize;
-    let mut start = end;
-    while start > 0 && acc_rows < inner_height {
-        start -= 1;
-        let formatted = format_chat_line(&buf.messages[start], my_nick);
+    let mut visible_lines = Vec::with_capacity(inner_height.min(end));
+    for msg in buf.messages[..end].iter().rev() {
+        if acc_rows >= inner_height {
+            break;
+        }
+        let formatted = format_chat_line(msg, my_nick);
         acc_rows += wrapped_line_height(&formatted, width);
+        visible_lines.push(formatted);
     }
-
-    let visible_lines: Vec<Line> = buf.messages[start..end]
-        .iter()
-        .map(|msg| format_chat_line(msg, my_nick))
-        .collect();
+    visible_lines.reverse();
 
     let extra_scroll = acc_rows.saturating_sub(inner_height) as u16;
     let paragraph = Paragraph::new(visible_lines)
