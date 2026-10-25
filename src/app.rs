@@ -1523,4 +1523,22 @@ mod tests {
         assert!(app.buffers[linux_idx].parted);
         assert!(app.buffers[linux_idx].users.is_empty());
     }
+
+    #[test]
+    fn routes_self_sent_dm_echo_to_recipient_buffer() {
+        let mut app = test_app();
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("irc_user".into(), "u".into(), "h".into())),
+                command: Command::PRIVMSG("bob".into(), "hello bob".into()),
+            },
+        );
+
+        assert!(app.find_buffer("libera", "irc_user").is_none());
+        let bob_idx = app.find_buffer("libera", "bob").unwrap();
+        assert_eq!(app.buffers[bob_idx].kind, BufferKind::DirectMessage);
+        assert_eq!(app.buffers[bob_idx].messages[0].content, "hello bob");
+    }
 }

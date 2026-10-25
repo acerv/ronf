@@ -99,9 +99,14 @@ impl App {
         match msg.command {
             Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
             Command::PRIVMSG(target, text) => {
+                let is_from_self = sender_nick
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&my_nick));
                 let is_channel = is_channel_name(&target);
                 let (buf_name, buf_kind) = if is_channel {
                     (target, BufferKind::Channel)
+                } else if is_from_self {
+                    (target, BufferKind::DirectMessage)
                 } else {
                     (
                         sender_nick.clone().unwrap_or(target),
@@ -111,9 +116,6 @@ impl App {
 
                 let is_new_dm = !is_channel && self.find_buffer(server_id, &buf_name).is_none();
                 let idx = self.ensure_buffer(server_id, &buf_name, buf_kind);
-                let is_from_self = sender_nick
-                    .as_deref()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(&my_nick));
 
                 let ctcp_action = strip_ctcp_action(&text).map(str::to_string);
                 let display_text = ctcp_action.as_deref().unwrap_or(&text);
