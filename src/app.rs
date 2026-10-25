@@ -1061,6 +1061,56 @@ mod tests {
     }
 
     #[test]
+    fn clamps_user_scroll_when_user_list_shrinks_or_clears() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.buffers[rust_idx].users = vec![
+            "alice".into(),
+            "bob".into(),
+            "charlie".into(),
+            "david".into(),
+            "eve".into(),
+        ];
+        app.buffers[rust_idx].user_scroll_offset = 4;
+
+        app.buffers[rust_idx].remove_user("eve");
+        assert_eq!(app.buffers[rust_idx].user_scroll_offset, 3);
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Response(
+                    Response::RPL_NAMREPLY,
+                    vec!["irc_user".into(), "=".into(), "#rust".into(), "alice bob".into()],
+                ),
+            },
+        );
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Response(
+                    Response::RPL_ENDOFNAMES,
+                    vec!["irc_user".into(), "#rust".into(), "End of /NAMES".into()],
+                ),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].users.len(), 2);
+        assert_eq!(app.buffers[rust_idx].user_scroll_offset, 1);
+
+        app.buffers[rust_idx].mark_parted();
+        assert_eq!(app.buffers[rust_idx].user_scroll_offset, 0);
+
+        app.buffers[rust_idx].users = vec!["alice".into(), "bob".into()];
+        app.buffers[rust_idx].user_scroll_offset = 1;
+        app.reset_server_channels("libera");
+        assert_eq!(app.buffers[rust_idx].user_scroll_offset, 0);
+    }
+
+    #[test]
     fn tab_completes_nicks_and_slash_commands() {
         let mut app = test_app();
         let rust_idx = app.find_buffer("libera", "#rust").unwrap();

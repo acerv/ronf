@@ -77,6 +77,7 @@ impl App {
         self.affected_server_buffers(server_id, |buf| {
             buf.users.clear();
             buf.pending_names.clear();
+            buf.user_scroll_offset = 0;
             buf.topic = None;
             false
         });

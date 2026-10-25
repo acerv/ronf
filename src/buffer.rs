@@ -87,6 +87,15 @@ impl Buffer {
         self.parted = true;
         self.users.clear();
         self.pending_names.clear();
+        self.user_scroll_offset = 0;
+    }
+
+    pub fn clamp_user_scroll(&mut self) {
+        if self.users.is_empty() {
+            self.user_scroll_offset = 0;
+        } else if self.user_scroll_offset >= self.users.len() {
+            self.user_scroll_offset = self.users.len() - 1;
+        }
     }
 
     pub fn sort_users(&mut self) {
@@ -106,6 +115,7 @@ impl Buffer {
             let (_, nick_b) = strip_user_prefix(b);
             nick_a.eq_ignore_ascii_case(nick_b)
         });
+        self.clamp_user_scroll();
     }
 
     fn find_user_mut(&mut self, nick: &str) -> Option<&mut String> {
@@ -133,7 +143,11 @@ impl Buffer {
         let before = self.users.len();
         self.users
             .retain(|u| !strip_user_prefix(u).1.eq_ignore_ascii_case(target_nick));
-        before != self.users.len()
+        let changed = before != self.users.len();
+        if changed {
+            self.clamp_user_scroll();
+        }
+        changed
     }
 
     pub fn rename_user(&mut self, old_nick: &str, new_nick: &str) -> bool {
