@@ -6,7 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{contains_nick_mention, strip_user_prefix, App, BufferKind, ChatLine, LineKind};
+use crate::app::{
+    contains_nick_mention, strip_user_prefix, App, BufferKind, ChatLine, LineKind, COMMAND_SPECS,
+};
 
 const NICK_PALETTE: &[Color] = &[
     Color::Cyan,
@@ -508,35 +510,10 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
         ),
         (
             "Slash Commands",
-            vec![
-                ("/help", "Open this help dialog"),
-                ("/join <#chan>", "Join channel on active server"),
-                ("/part [reason]", "Leave current channel"),
-                ("/msg <to> <text>", "Send private or channel message"),
-                ("/query <nick>", "Open direct message buffer"),
-                ("/nick <newnick>", "Change nick on active server"),
-                ("/me <action>", "Send CTCP action message"),
-                ("/topic [text]", "View or set channel topic"),
-                ("/whois <nick>", "Query user info via WHOIS"),
-                ("/kick <nick> [msg]", "Kick user from active channel"),
-                ("/invite <nick>", "Invite user to channel"),
-                ("/mode <modes>", "Set channel or user modes"),
-                ("/op / /deop <nick>", "Grant or revoke operator (@)"),
-                ("/voice / /devoice", "Grant or revoke voice (+)"),
-                ("/ban <mask>", "Ban hostmask on channel (+b)"),
-                ("/away [reason]", "Set or clear away status"),
-                ("/list [filter]", "List channels on server"),
-                ("/motd", "Request server Message of the Day"),
-                ("/buffer <target>", "Switch buffer by name or number"),
-                ("/reconnect", "Reconnect active server"),
-                ("/ignore [nick]", "Ignore user or list ignored"),
-                ("/unignore <nick>", "Stop ignoring user"),
-                ("/search <query>", "Search active buffer messages"),
-                ("/raw <irc_line>", "Send raw IRC protocol line"),
-                ("/clear", "Clear active buffer history"),
-                ("/close", "Close active channel or DM"),
-                ("/quit [reason]", "Disconnect all and exit"),
-            ],
+            COMMAND_SPECS
+                .iter()
+                .map(|spec| (spec.usage, spec.description))
+                .collect(),
         ),
         (
             "Help Dialog & App",

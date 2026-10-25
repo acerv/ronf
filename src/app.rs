@@ -12,38 +12,153 @@ use irc::proto::{ChannelMode, Command, Message, Mode, Prefix, Response};
 
 use crate::config::{AppConfig, DEFAULT_GENERIC_NICK, DEFAULT_HISTORY_LIMIT};
 
-pub const SLASH_COMMANDS: &[&str] = &[
-    "/help",
-    "/join",
-    "/part",
-    "/msg",
-    "/query",
-    "/nick",
-    "/me",
-    "/topic",
-    "/whois",
-    "/kick",
-    "/invite",
-    "/mode",
-    "/ban",
-    "/op",
-    "/deop",
-    "/voice",
-    "/devoice",
-    "/away",
-    "/motd",
-    "/list",
-    "/buffer",
-    "/reconnect",
-    "/ignore",
-    "/unignore",
-    "/search",
-    "/raw",
-    "/quote",
-    "/clear",
-    "/close",
-    "/quit",
+pub struct CommandSpec {
+    pub names: &'static [&'static str],
+    pub usage: &'static str,
+    pub description: &'static str,
+}
+
+pub const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec {
+        names: &["/help"],
+        usage: "/help",
+        description: "Open this help dialog",
+    },
+    CommandSpec {
+        names: &["/join"],
+        usage: "/join <#chan>",
+        description: "Join channel on active server",
+    },
+    CommandSpec {
+        names: &["/part", "/leave"],
+        usage: "/part [reason]",
+        description: "Leave current channel",
+    },
+    CommandSpec {
+        names: &["/msg"],
+        usage: "/msg <to> <text>",
+        description: "Send private or channel message",
+    },
+    CommandSpec {
+        names: &["/query"],
+        usage: "/query <nick>",
+        description: "Open direct message buffer",
+    },
+    CommandSpec {
+        names: &["/nick"],
+        usage: "/nick <newnick>",
+        description: "Change nick on active server",
+    },
+    CommandSpec {
+        names: &["/me"],
+        usage: "/me <action>",
+        description: "Send CTCP action message",
+    },
+    CommandSpec {
+        names: &["/topic"],
+        usage: "/topic [text]",
+        description: "View or set channel topic",
+    },
+    CommandSpec {
+        names: &["/whois"],
+        usage: "/whois <nick>",
+        description: "Query user info via WHOIS",
+    },
+    CommandSpec {
+        names: &["/kick"],
+        usage: "/kick <nick> [msg]",
+        description: "Kick user from active channel",
+    },
+    CommandSpec {
+        names: &["/invite"],
+        usage: "/invite <nick>",
+        description: "Invite user to channel",
+    },
+    CommandSpec {
+        names: &["/mode"],
+        usage: "/mode <modes>",
+        description: "Set channel or user modes",
+    },
+    CommandSpec {
+        names: &["/op", "/deop"],
+        usage: "/op / /deop <nick>",
+        description: "Grant or revoke operator (@)",
+    },
+    CommandSpec {
+        names: &["/voice", "/devoice"],
+        usage: "/voice / /devoice",
+        description: "Grant or revoke voice (+)",
+    },
+    CommandSpec {
+        names: &["/ban"],
+        usage: "/ban <mask>",
+        description: "Ban hostmask on channel (+b)",
+    },
+    CommandSpec {
+        names: &["/away"],
+        usage: "/away [reason]",
+        description: "Set or clear away status",
+    },
+    CommandSpec {
+        names: &["/list"],
+        usage: "/list [filter]",
+        description: "List channels on server",
+    },
+    CommandSpec {
+        names: &["/motd"],
+        usage: "/motd",
+        description: "Request server Message of the Day",
+    },
+    CommandSpec {
+        names: &["/buffer"],
+        usage: "/buffer <target>",
+        description: "Switch buffer by name or number",
+    },
+    CommandSpec {
+        names: &["/reconnect"],
+        usage: "/reconnect",
+        description: "Reconnect active server",
+    },
+    CommandSpec {
+        names: &["/ignore"],
+        usage: "/ignore [nick]",
+        description: "Ignore user or list ignored",
+    },
+    CommandSpec {
+        names: &["/unignore"],
+        usage: "/unignore <nick>",
+        description: "Stop ignoring user",
+    },
+    CommandSpec {
+        names: &["/search"],
+        usage: "/search <query>",
+        description: "Search active buffer messages",
+    },
+    CommandSpec {
+        names: &["/raw", "/quote"],
+        usage: "/raw <irc_line>",
+        description: "Send raw IRC protocol line",
+    },
+    CommandSpec {
+        names: &["/clear"],
+        usage: "/clear",
+        description: "Clear active buffer history",
+    },
+    CommandSpec {
+        names: &["/close"],
+        usage: "/close",
+        description: "Close active channel or DM",
+    },
+    CommandSpec {
+        names: &["/quit", "/exit"],
+        usage: "/quit [reason]",
+        description: "Disconnect all and exit",
+    },
 ];
+
+pub fn slash_command_names() -> impl Iterator<Item = &'static str> {
+    COMMAND_SPECS.iter().flat_map(|spec| spec.names.iter().copied())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -684,7 +799,7 @@ impl InputState {
         }
     }
 
-    pub fn complete_tab(&mut self, users: &[String], slash_commands: &[&str]) {
+    pub fn complete_tab(&mut self, users: &[String]) {
         if let Some(mut state) = self.tab_state.take() {
             if !state.candidates.is_empty() {
                 state.index = (state.index + 1) % state.candidates.len();
@@ -713,8 +828,7 @@ impl InputState {
 
         let candidates: Vec<String> = if token_start == 0 && token.starts_with('/') {
             let lower = token.to_ascii_lowercase();
-            slash_commands
-                .iter()
+            slash_command_names()
                 .filter(|cmd| cmd.starts_with(&lower))
                 .map(|cmd| format!("{cmd} "))
                 .collect()
@@ -1208,7 +1322,7 @@ impl App {
         match key.code {
             KeyCode::Tab => {
                 let users = &self.buffers[self.active_buffer].users;
-                self.input.complete_tab(users, SLASH_COMMANDS);
+                self.input.complete_tab(users);
             }
             KeyCode::Enter => self.submit_input(),
             KeyCode::Up => self.input.history_prev(),
