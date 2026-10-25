@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 pub mod app;
+pub mod buffer;
+pub mod command;
 pub mod config;
+pub mod input;
+pub mod irc_handler;
+pub mod log_store;
 pub mod ui;
 
 use std::time::Duration;
@@ -13,8 +18,9 @@ use irc::client::prelude::{Client, Config as IrcConfig};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use crate::app::{App, ServerEvent};
+use crate::app::App;
 use crate::config::AppConfig;
+use crate::irc_handler::ServerEvent;
 
 #[tokio::main]
 async fn main() -> Result<()> {

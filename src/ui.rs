@@ -8,9 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{
-    contains_nick_mention, strip_user_prefix, App, BufferKind, ChatLine, LineKind, COMMAND_SPECS,
-};
+use crate::app::App;
+use crate::buffer::{contains_nick_mention, strip_user_prefix, BufferKind, ChatLine, LineKind};
+use crate::command::COMMAND_SPECS;
 
 const NICK_PALETTE: &[Color] = &[
     Color::Cyan,

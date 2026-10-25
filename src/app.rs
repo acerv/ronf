@@ -1,732 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use irc::client::Sender;
-use irc::proto::{ChannelMode, Command, Message, Mode, Prefix, Response};
+use irc::proto::{Command, Message};
 
+use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
+use crate::command::{parse_user_command, UserCommand};
 use crate::config::{AppConfig, DEFAULT_GENERIC_NICK, DEFAULT_HISTORY_LIMIT};
-
-pub struct CommandSpec {
-    pub names: &'static [&'static str],
-    pub usage: &'static str,
-    pub description: &'static str,
-}
-
-pub const COMMAND_SPECS: &[CommandSpec] = &[
-    CommandSpec {
-        names: &["/help"],
-        usage: "/help",
-        description: "Open this help dialog",
-    },
-    CommandSpec {
-        names: &["/join"],
-        usage: "/join <#chan>",
-        description: "Join channel on active server",
-    },
-    CommandSpec {
-        names: &["/part", "/leave"],
-        usage: "/part [reason]",
-        description: "Leave current channel",
-    },
-    CommandSpec {
-        names: &["/msg"],
-        usage: "/msg <to> <text>",
-        description: "Send private or channel message",
-    },
-    CommandSpec {
-        names: &["/query"],
-        usage: "/query <nick>",
-        description: "Open direct message buffer",
-    },
-    CommandSpec {
-        names: &["/nick"],
-        usage: "/nick <newnick>",
-        description: "Change nick on active server",
-    },
-    CommandSpec {
-        names: &["/me"],
-        usage: "/me <action>",
-        description: "Send CTCP action message",
-    },
-    CommandSpec {
-        names: &["/topic"],
-        usage: "/topic [text]",
-        description: "View or set channel topic",
-    },
-    CommandSpec {
-        names: &["/whois"],
-        usage: "/whois <nick>",
-        description: "Query user info via WHOIS",
-    },
-    CommandSpec {
-        names: &["/kick"],
-        usage: "/kick <nick> [msg]",
-        description: "Kick user from active channel",
-    },
-    CommandSpec {
-        names: &["/invite"],
-        usage: "/invite <nick>",
-        description: "Invite user to channel",
-    },
-    CommandSpec {
-        names: &["/mode"],
-        usage: "/mode <modes>",
-        description: "Set channel or user modes",
-    },
-    CommandSpec {
-        names: &["/op", "/deop"],
-        usage: "/op / /deop <nick>",
-        description: "Grant or revoke operator (@)",
-    },
-    CommandSpec {
-        names: &["/voice", "/devoice"],
-        usage: "/voice / /devoice",
-        description: "Grant or revoke voice (+)",
-    },
-    CommandSpec {
-        names: &["/ban"],
-        usage: "/ban <mask>",
-        description: "Ban hostmask on channel (+b)",
-    },
-    CommandSpec {
-        names: &["/away"],
-        usage: "/away [reason]",
-        description: "Set or clear away status",
-    },
-    CommandSpec {
-        names: &["/list"],
-        usage: "/list [filter]",
-        description: "List channels on server",
-    },
-    CommandSpec {
-        names: &["/motd"],
-        usage: "/motd",
-        description: "Request server Message of the Day",
-    },
-    CommandSpec {
-        names: &["/buffer"],
-        usage: "/buffer <target>",
-        description: "Switch buffer by name or number",
-    },
-    CommandSpec {
-        names: &["/reconnect"],
-        usage: "/reconnect",
-        description: "Reconnect active server",
-    },
-    CommandSpec {
-        names: &["/ignore"],
-        usage: "/ignore [nick]",
-        description: "Ignore user or list ignored",
-    },
-    CommandSpec {
-        names: &["/unignore"],
-        usage: "/unignore <nick>",
-        description: "Stop ignoring user",
-    },
-    CommandSpec {
-        names: &["/search"],
-        usage: "/search <query>",
-        description: "Search active buffer messages",
-    },
-    CommandSpec {
-        names: &["/raw", "/quote"],
-        usage: "/raw <irc_line>",
-        description: "Send raw IRC protocol line",
-    },
-    CommandSpec {
-        names: &["/clear"],
-        usage: "/clear",
-        description: "Clear active buffer history",
-    },
-    CommandSpec {
-        names: &["/close"],
-        usage: "/close",
-        description: "Close active channel or DM",
-    },
-    CommandSpec {
-        names: &["/quit", "/exit"],
-        usage: "/quit [reason]",
-        description: "Disconnect all and exit",
-    },
-];
-
-pub fn slash_command_names() -> impl Iterator<Item = &'static str> {
-    COMMAND_SPECS.iter().flat_map(|spec| spec.names.iter().copied())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineKind {
-    Normal,
-    Action,
-    System,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatLine {
-    pub timestamp: String,
-    pub sender: Option<String>,
-    pub content: String,
-    pub kind: LineKind,
-}
-
-impl ChatLine {
-    pub fn new(sender: Option<String>, content: impl Into<String>, kind: LineKind) -> Self {
-        Self {
-            timestamp: Local::now().format("%H:%M:%S").to_string(),
-            sender,
-            content: content.into(),
-            kind,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferKind {
-    Server,
-    Channel,
-    DirectMessage,
-}
-
-#[derive(Debug, Clone)]
-pub struct Buffer {
-    pub server_id: String,
-    pub name: String,
-    pub kind: BufferKind,
-    pub topic: Option<String>,
-    pub users: Vec<String>,
-    pub pending_names: Vec<String>,
-    pub user_scroll_offset: usize,
-    pub messages: Vec<ChatLine>,
-    pub history_cursor: Option<usize>,
-    pub scroll_offset: usize,
-    pub unread: bool,
-    pub highlight: bool,
-    pub parted: bool,
-}
-
-impl Buffer {
-    pub fn new(server_id: impl Into<String>, name: impl Into<String>, kind: BufferKind) -> Self {
-        Self {
-            server_id: server_id.into(),
-            name: name.into(),
-            kind,
-            topic: None,
-            users: Vec::new(),
-            pending_names: Vec::new(),
-            user_scroll_offset: 0,
-            messages: Vec::new(),
-            history_cursor: None,
-            scroll_offset: 0,
-            unread: false,
-            highlight: false,
-            parted: false,
-        }
-    }
-
-    pub fn push_line(&mut self, line: ChatLine, is_active: bool) {
-        self.messages.push(line);
-        if !is_active {
-            self.unread = true;
-        }
-    }
-
-    pub fn sort_users(&mut self) {
-        for user in &mut self.users {
-            let (prefixes, raw) = extract_user_prefixes(user);
-            *user = format!("{prefixes}{raw}");
-        }
-        self.users.sort_by(|a, b| {
-            let (pref_a, nick_a) = strip_user_prefix(a);
-            let (pref_b, nick_b) = strip_user_prefix(b);
-            role_rank(pref_a)
-                .cmp(&role_rank(pref_b))
-                .then_with(|| nick_a.to_ascii_lowercase().cmp(&nick_b.to_ascii_lowercase()))
-        });
-        self.users.dedup_by(|a, b| {
-            let (_, nick_a) = strip_user_prefix(a);
-            let (_, nick_b) = strip_user_prefix(b);
-            nick_a.eq_ignore_ascii_case(nick_b)
-        });
-    }
-
-    fn find_user_mut(&mut self, nick: &str) -> Option<&mut String> {
-        let (_, target) = strip_user_prefix(nick);
-        self.users
-            .iter_mut()
-            .find(|u| strip_user_prefix(u).1.eq_ignore_ascii_case(target))
-    }
-
-    pub fn add_user(&mut self, entry: &str) {
-        let (_, new_nick) = strip_user_prefix(entry);
-        if new_nick.is_empty() {
-            return;
-        }
-        if let Some(existing) = self.find_user_mut(new_nick) {
-            *existing = entry.to_string();
-        } else {
-            self.users.push(entry.to_string());
-        }
-        self.sort_users();
-    }
-
-    pub fn remove_user(&mut self, nick: &str) -> bool {
-        let (_, target_nick) = strip_user_prefix(nick);
-        let before = self.users.len();
-        self.users
-            .retain(|u| !strip_user_prefix(u).1.eq_ignore_ascii_case(target_nick));
-        before != self.users.len()
-    }
-
-    pub fn rename_user(&mut self, old_nick: &str, new_nick: &str) -> bool {
-        let (_, old_raw) = strip_user_prefix(old_nick);
-        let (_, new_raw) = strip_user_prefix(new_nick);
-        let mut found = false;
-        for user in &mut self.users {
-            let (prefixes, n) = extract_user_prefixes(user);
-            if n.eq_ignore_ascii_case(old_raw) {
-                *user = format!("{prefixes}{new_raw}");
-                found = true;
-            }
-        }
-        if found {
-            self.sort_users();
-        }
-        found
-    }
-
-    pub fn apply_channel_modes(&mut self, modes: &[Mode<ChannelMode>]) {
-        let mut changed = false;
-        for mode in modes {
-            let (adding, cm, target) = match mode {
-                Mode::Plus(cm, Some(target)) => (true, cm, target),
-                Mode::Minus(cm, Some(target)) => (false, cm, target),
-                _ => continue,
-            };
-            let Some(pref) = channel_mode_prefix(cm) else {
-                continue;
-            };
-            let Some(user) = self.find_user_mut(target) else {
-                continue;
-            };
-            let (mut prefixes, raw) = extract_user_prefixes(user);
-            if adding && !prefixes.contains(pref) {
-                prefixes.push(pref);
-                *user = format!("{prefixes}{raw}");
-                changed = true;
-            } else if !adding && prefixes.contains(pref) {
-                prefixes.retain(|c| c != pref);
-                *user = format!("{prefixes}{raw}");
-                changed = true;
-            }
-        }
-        if changed {
-            self.sort_users();
-        }
-    }
-}
-
-pub fn is_channel_name(name: &str) -> bool {
-    name.starts_with(['#', '&'])
-}
-
-fn is_role_prefix(ch: char) -> bool {
-    matches!(ch, '~' | '&' | '@' | '%' | '+')
-}
-
-fn channel_mode_prefix(cm: &ChannelMode) -> Option<char> {
-    match cm {
-        ChannelMode::Founder => Some('~'),
-        ChannelMode::Admin => Some('&'),
-        ChannelMode::Oper => Some('@'),
-        ChannelMode::Halfop => Some('%'),
-        ChannelMode::Voice => Some('+'),
-        _ => None,
-    }
-}
-
-pub fn extract_user_prefixes(entry: &str) -> (String, &str) {
-    let raw = entry.trim_start_matches(is_role_prefix);
-    let mut prefs: Vec<char> = entry[..entry.len() - raw.len()].chars().collect();
-    prefs.sort_by_key(|&c| role_rank(Some(c)));
-    prefs.dedup();
-    (prefs.into_iter().collect(), raw)
-}
-
-pub fn strip_user_prefix(entry: &str) -> (Option<char>, &str) {
-    let raw = entry.trim_start_matches(is_role_prefix);
-    let top = entry[..entry.len() - raw.len()]
-        .chars()
-        .min_by_key(|&c| role_rank(Some(c)));
-    (top, raw)
-}
-
-fn role_rank(prefix: Option<char>) -> u8 {
-    match prefix {
-        Some('~') => 0,
-        Some('&') => 1,
-        Some('@') => 2,
-        Some('%') => 3,
-        Some('+') => 4,
-        _ => 5,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UserCommand {
-    Help,
-    Join(String),
-    Part(Option<String>),
-    Msg { target: String, text: String },
-    Query { target: String, text: Option<String> },
-    Nick(String),
-    Me(String),
-    Topic(Option<String>),
-    Whois(String),
-    Kick { nick: String, reason: Option<String> },
-    Invite { nick: String, channel: Option<String> },
-    Mode {
-        target: Option<String>,
-        args: String,
-        channel_only: bool,
-    },
-    Away(Option<String>),
-    Motd,
-    List(Option<String>),
-    Buffer(String),
-    Reconnect,
-    Ignore(Option<String>),
-    Unignore(String),
-    Search(String),
-    Raw(String),
-    Clear,
-    Close,
-    Quit(Option<String>),
-    Say(String),
-}
-
-fn non_empty(s: &str) -> Option<String> {
-    (!s.is_empty()).then(|| s.to_string())
-}
-
-fn first_word(s: &str) -> Option<&str> {
-    s.split_whitespace().next()
-}
-
-fn split_first_arg(s: &str) -> Option<(String, Option<String>)> {
-    if s.is_empty() {
-        return None;
-    }
-    match s.split_once(char::is_whitespace) {
-        Some((first, tail)) => Some((first.to_string(), non_empty(tail.trim()))),
-        None => Some((s.to_string(), None)),
-    }
-}
-
-pub fn parse_user_command(input: &str) -> Option<UserCommand> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if !trimmed.starts_with('/') {
-        return Some(UserCommand::Say(input.to_string()));
-    }
-
-    let (cmd, rest) = match trimmed.split_once(char::is_whitespace) {
-        Some((c, r)) => (c.to_ascii_lowercase(), r.trim()),
-        None => (trimmed.to_ascii_lowercase(), ""),
-    };
-
-    match cmd.as_str() {
-        "/help" | "/h" | "/?" => Some(UserCommand::Help),
-        "/join" | "/j" => {
-            let chan = first_word(rest)?;
-            let normalized = if is_channel_name(chan) {
-                chan.to_string()
-            } else {
-                format!("#{chan}")
-            };
-            Some(UserCommand::Join(normalized))
-        }
-        "/part" | "/leave" => Some(UserCommand::Part(non_empty(rest))),
-        "/msg" => {
-            let (target, Some(text)) = split_first_arg(rest)? else {
-                return None;
-            };
-            Some(UserCommand::Msg { target, text })
-        }
-        "/query" => {
-            let (target, text) = split_first_arg(rest)?;
-            Some(UserCommand::Query { target, text })
-        }
-        "/nick" => Some(UserCommand::Nick(first_word(rest)?.to_string())),
-        "/me" => non_empty(rest).map(UserCommand::Me),
-        "/topic" => Some(UserCommand::Topic(non_empty(rest))),
-        "/whois" => Some(UserCommand::Whois(first_word(rest)?.to_string())),
-        "/kick" => {
-            let (nick, reason) = split_first_arg(rest)?;
-            Some(UserCommand::Kick { nick, reason })
-        }
-        "/invite" => {
-            let (nick, channel) = split_first_arg(rest)?;
-            Some(UserCommand::Invite { nick, channel })
-        }
-        "/mode" => {
-            let (first, rem) = split_first_arg(rest)?;
-            if is_channel_name(&first) {
-                Some(UserCommand::Mode {
-                    target: Some(first),
-                    args: rem.unwrap_or_default(),
-                    channel_only: false,
-                })
-            } else {
-                Some(UserCommand::Mode {
-                    target: None,
-                    args: rest.to_string(),
-                    channel_only: false,
-                })
-            }
-        }
-        "/ban" | "/op" | "/deop" | "/voice" | "/devoice" => {
-            let arg = first_word(rest)?;
-            let flag = match cmd.as_str() {
-                "/ban" => "+b",
-                "/op" => "+o",
-                "/deop" => "-o",
-                "/voice" => "+v",
-                _ => "-v",
-            };
-            Some(UserCommand::Mode {
-                target: None,
-                args: format!("{flag} {arg}"),
-                channel_only: true,
-            })
-        }
-        "/away" => Some(UserCommand::Away(non_empty(rest))),
-        "/motd" => Some(UserCommand::Motd),
-        "/list" => Some(UserCommand::List(non_empty(rest))),
-        "/buffer" | "/b" => non_empty(rest).map(UserCommand::Buffer),
-        "/reconnect" => Some(UserCommand::Reconnect),
-        "/ignore" => Some(UserCommand::Ignore(first_word(rest).map(str::to_string))),
-        "/unignore" => Some(UserCommand::Unignore(first_word(rest)?.to_string())),
-        "/search" => non_empty(rest).map(UserCommand::Search),
-        "/raw" | "/quote" => non_empty(rest).map(UserCommand::Raw),
-        "/clear" => Some(UserCommand::Clear),
-        "/close" => Some(UserCommand::Close),
-        "/quit" | "/exit" => Some(UserCommand::Quit(non_empty(rest))),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TabCompletionState {
-    pub replace_start: usize,
-    pub replace_len: usize,
-    pub candidates: Vec<String>,
-    pub index: usize,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct InputState {
-    pub text: String,
-    pub cursor_pos: usize,
-    pub history: Vec<String>,
-    pub history_index: Option<usize>,
-    pub saved_draft: String,
-    pub tab_state: Option<TabCompletionState>,
-}
-
-impl InputState {
-    pub fn set_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
-        self.cursor_pos = self.text.len();
-    }
-
-    pub fn cancel(&mut self) {
-        self.text.clear();
-        self.cursor_pos = 0;
-        self.history_index = None;
-        self.saved_draft.clear();
-        self.tab_state = None;
-    }
-
-    pub fn clear_line(&mut self) {
-        self.text.clear();
-        self.cursor_pos = 0;
-    }
-
-    pub fn move_home(&mut self) {
-        self.cursor_pos = 0;
-    }
-
-    pub fn move_end(&mut self) {
-        self.cursor_pos = self.text.len();
-    }
-
-    pub fn move_left(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos = prev_char_boundary(&self.text, self.cursor_pos);
-        }
-    }
-
-    pub fn move_right(&mut self) {
-        if self.cursor_pos < self.text.len() {
-            self.cursor_pos = next_char_boundary(&self.text, self.cursor_pos);
-        }
-    }
-
-    pub fn backspace(&mut self) {
-        if self.cursor_pos > 0 {
-            let prev = prev_char_boundary(&self.text, self.cursor_pos);
-            self.text.replace_range(prev..self.cursor_pos, "");
-            self.cursor_pos = prev;
-        }
-    }
-
-    pub fn delete_forward(&mut self) {
-        if self.cursor_pos < self.text.len() {
-            let next = next_char_boundary(&self.text, self.cursor_pos);
-            self.text.replace_range(self.cursor_pos..next, "");
-        }
-    }
-
-    pub fn insert_char(&mut self, ch: char) {
-        self.text.insert(self.cursor_pos, ch);
-        self.cursor_pos += ch.len_utf8();
-    }
-
-    pub fn delete_word_backwards(&mut self) {
-        if self.cursor_pos == 0 {
-            return;
-        }
-        let before = &self.text[..self.cursor_pos];
-        let trimmed_ws = before.trim_end_matches(char::is_whitespace);
-        let word_start = trimmed_ws
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        self.text.replace_range(word_start..self.cursor_pos, "");
-        self.cursor_pos = word_start;
-    }
-
-    pub fn history_prev(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let next_idx = match self.history_index {
-            None => {
-                self.saved_draft = self.text.clone();
-                self.history.len() - 1
-            }
-            Some(0) => 0,
-            Some(i) => i - 1,
-        };
-        self.history_index = Some(next_idx);
-        self.set_text(self.history[next_idx].clone());
-    }
-
-    pub fn history_next(&mut self) {
-        let Some(idx) = self.history_index else {
-            return;
-        };
-        if idx + 1 < self.history.len() {
-            let next_idx = idx + 1;
-            self.history_index = Some(next_idx);
-            self.set_text(self.history[next_idx].clone());
-        } else {
-            self.history_index = None;
-            let draft = std::mem::take(&mut self.saved_draft);
-            self.set_text(draft);
-        }
-    }
-
-    pub fn complete_tab(&mut self, users: &[String]) {
-        if let Some(mut state) = self.tab_state.take() {
-            if !state.candidates.is_empty() {
-                state.index = (state.index + 1) % state.candidates.len();
-                let replacement = &state.candidates[state.index];
-                let end = state.replace_start + state.replace_len;
-                self.text
-                    .replace_range(state.replace_start..end, replacement);
-                state.replace_len = replacement.len();
-                self.cursor_pos = state.replace_start + state.replace_len;
-                self.tab_state = Some(state);
-            }
-            return;
-        }
-
-        let before_cursor = &self.text[..self.cursor_pos];
-        let token_start = before_cursor
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        let token = &before_cursor[token_start..];
-        if token.is_empty() {
-            return;
-        }
-
-        let candidates: Vec<String> = if token_start == 0 && token.starts_with('/') {
-            let lower = token.to_ascii_lowercase();
-            slash_command_names()
-                .filter(|cmd| cmd.starts_with(&lower))
-                .map(|cmd| format!("{cmd} "))
-                .collect()
-        } else {
-            let lower = token.to_ascii_lowercase();
-            let suffix = if token_start == 0 { ": " } else { " " };
-            users
-                .iter()
-                .map(|u| strip_user_prefix(u).1)
-                .filter(|nick| nick.to_ascii_lowercase().starts_with(&lower))
-                .map(|nick| format!("{nick}{suffix}"))
-                .collect()
-        };
-
-        if candidates.is_empty() {
-            return;
-        }
-
-        let replacement = candidates[0].clone();
-        self.text
-            .replace_range(token_start..self.cursor_pos, &replacement);
-        let replace_len = replacement.len();
-        self.cursor_pos = token_start + replace_len;
-        self.tab_state = Some(TabCompletionState {
-            replace_start: token_start,
-            replace_len,
-            candidates,
-            index: 0,
-        });
-    }
-
-    pub fn take_submitted(&mut self) -> Option<String> {
-        let line = std::mem::take(&mut self.text);
-        self.cursor_pos = 0;
-        self.history_index = None;
-        self.saved_draft.clear();
-
-        if line.trim().is_empty() {
-            return None;
-        }
-
-        if self.history.last() != Some(&line) {
-            self.history.push(line.clone());
-        }
-
-        Some(line)
-    }
-}
+use crate::input::InputState;
+use crate::log_store::{append_buffer_log, discover_dm_buffers, load_more_buffer_history};
 
 #[derive(Debug, Clone)]
 pub struct ServerState {
@@ -734,22 +19,6 @@ pub struct ServerState {
     pub show_join_part: bool,
     pub history_limit: usize,
     pub sender: Option<Sender>,
-}
-
-#[derive(Debug)]
-pub enum ServerEvent {
-    Connected {
-        server_id: String,
-        sender: Sender,
-    },
-    Message {
-        server_id: String,
-        message: Box<Message>,
-    },
-    Error {
-        server_id: String,
-        error: String,
-    },
 }
 
 pub struct App {
@@ -850,7 +119,7 @@ impl App {
         self.servers.get(server_id).and_then(|s| s.sender.as_ref())
     }
 
-    fn set_nick(&mut self, server_id: &str, new_nick: String) -> String {
+    pub(crate) fn set_nick(&mut self, server_id: &str, new_nick: String) -> String {
         if let Some(srv) = self.servers.get_mut(server_id) {
             std::mem::replace(&mut srv.nick, new_nick)
         } else {
@@ -867,7 +136,7 @@ impl App {
         }
     }
 
-    fn set_sender(&mut self, server_id: &str, sender: Option<Sender>) -> Option<Sender> {
+    pub(crate) fn set_sender(&mut self, server_id: &str, sender: Option<Sender>) -> Option<Sender> {
         if let Some(srv) = self.servers.get_mut(server_id) {
             std::mem::replace(&mut srv.sender, sender)
         } else {
@@ -1408,15 +677,15 @@ impl App {
                 args,
                 channel_only,
             } => {
-                if channel_only && target.is_none() {
-                    if self
+                if channel_only
+                    && target.is_none()
+                    && self
                         .require_active_channel(
                             "Cannot use channel mode command outside a channel buffer",
                         )
                         .is_none()
-                    {
-                        return;
-                    }
+                {
+                    return;
                 }
                 let target_name = match target {
                     Some(t) => t,
@@ -1599,592 +868,16 @@ impl App {
         }
         self.should_quit = true;
     }
-
-    fn affected_server_buffers(
-        &mut self,
-        server_id: &str,
-        mut f: impl FnMut(&mut Buffer) -> bool,
-    ) -> Vec<usize> {
-        self.buffers
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(i, buf)| {
-                (buf.server_id.eq_ignore_ascii_case(server_id) && f(buf)).then_some(i)
-            })
-            .collect()
-    }
-
-    fn set_channel_topic(
-        &mut self,
-        server_id: &str,
-        chan: &str,
-        topic: Option<String>,
-        announce_empty: bool,
-    ) {
-        let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
-        self.buffers[idx].topic = topic.clone();
-        match topic {
-            Some(t) => self.push_system(idx, format!("* Topic for {chan}: {t}")),
-            None if announce_empty => {
-                self.push_system(idx, format!("* No topic is set for {chan}"))
-            }
-            None => {}
-        }
-    }
-
-    fn push_whois(&mut self, idx: usize, nick: &str, detail: impl std::fmt::Display) {
-        self.push_system(idx, format!("* [whois] {nick} {detail}"));
-    }
-
-    fn push_whois_tail(&mut self, idx: usize, args: &[String]) {
-        if args.len() >= 3 {
-            self.push_whois(idx, &args[1], args[2..].join(" "));
-        }
-    }
-
-    pub fn handle_server_event(&mut self, event: ServerEvent) {
-        match event {
-            ServerEvent::Connected { server_id, sender } => {
-                self.affected_server_buffers(&server_id, |buf| {
-                    buf.pending_names.clear();
-                    false
-                });
-                self.set_sender(&server_id, Some(sender));
-                if let Some(idx) = self.find_server_buffer(&server_id) {
-                    self.push_system(idx, format!("Connected to [{server_id}]"));
-                }
-            }
-            ServerEvent::Error { server_id, error } => {
-                self.set_sender(&server_id, None);
-                if let Some(idx) = self.find_server_buffer(&server_id) {
-                    self.push_error(idx, error);
-                }
-            }
-            ServerEvent::Message { server_id, message } => {
-                self.handle_irc_message(&server_id, *message);
-            }
-        }
-    }
-
-    pub fn handle_irc_message(&mut self, server_id: &str, msg: Message) {
-        let sender_nick = extract_nick(&msg.prefix);
-        let is_ignored = sender_nick
-            .as_deref()
-            .is_some_and(|n| self.ignored_nicks.contains(&n.to_ascii_lowercase()));
-        let my_nick = self.nick_for(server_id).to_string();
-
-        match msg.command {
-            Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
-            Command::PRIVMSG(target, text) => {
-                let is_channel = is_channel_name(&target);
-                let (buf_name, buf_kind) = if is_channel {
-                    (target, BufferKind::Channel)
-                } else {
-                    (
-                        sender_nick.clone().unwrap_or(target),
-                        BufferKind::DirectMessage,
-                    )
-                };
-
-                let is_new_dm = !is_channel && self.find_buffer(server_id, &buf_name).is_none();
-                let idx = self.ensure_buffer(server_id, &buf_name, buf_kind);
-                let is_from_self = sender_nick
-                    .as_deref()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(&my_nick));
-
-                let ctcp_action = strip_ctcp_action(&text).map(str::to_string);
-                let display_text = ctcp_action.as_deref().unwrap_or(&text);
-                let is_mentioned =
-                    is_channel && !is_from_self && contains_nick_mention(display_text, &my_nick);
-
-                if !is_from_self && (is_new_dm || !is_channel || is_mentioned) {
-                    if idx != self.active_buffer {
-                        self.buffers[idx].highlight = true;
-                    }
-                    if is_new_dm {
-                        send_desktop_notification(
-                            &format!("New conversation from {buf_name} ({server_id})"),
-                            display_text,
-                        );
-                    } else if is_mentioned {
-                        let from = sender_nick.as_deref().unwrap_or("someone");
-                        send_desktop_notification(
-                            &format!("Mentioned by {from} in {buf_name} ({server_id})"),
-                            display_text,
-                        );
-                    } else if !is_channel && idx != self.active_buffer {
-                        send_desktop_notification(
-                            &format!("Message from {buf_name} ({server_id})"),
-                            display_text,
-                        );
-                    }
-                }
-
-                let (content, kind) = match ctcp_action {
-                    Some(action) => (action, LineKind::Action),
-                    None => (text, LineKind::Normal),
-                };
-                self.push_to_buffer(idx, ChatLine::new(sender_nick, content, kind));
-            }
-            Command::NOTICE(target, text) => {
-                let idx = if is_channel_name(&target) {
-                    self.ensure_buffer(server_id, &target, BufferKind::Channel)
-                } else {
-                    self.find_server_buffer(server_id).unwrap_or(0)
-                };
-                let prefix = sender_nick.map(|n| format!("-{n}- {text}")).unwrap_or(text);
-                self.push_system(idx, prefix);
-            }
-            Command::JOIN(chan, _, _) => {
-                let idx = self.ensure_buffer(server_id, &chan, BufferKind::Channel);
-                if let Some(nick) = sender_nick {
-                    if nick.eq_ignore_ascii_case(&my_nick) {
-                        self.buffers[idx].parted = false;
-                    }
-                    self.buffers[idx].add_user(&nick);
-                    if self.should_show_join_part(server_id) {
-                        self.push_system(idx, format!("--> {nick} has joined {chan}"));
-                    }
-                }
-            }
-            Command::PART(chan, reason) => {
-                if let Some(idx) = self.find_buffer(server_id, &chan) {
-                    if let Some(nick) = sender_nick {
-                        self.buffers[idx].remove_user(&nick);
-                        if self.should_show_join_part(server_id) {
-                            let suffix = format_reason(reason);
-                            self.push_system(idx, format!("<-- {nick} has left {chan}{suffix}"));
-                        }
-                    }
-                }
-            }
-            Command::KICK(chan, kicked, reason) => {
-                if let Some(idx) = self.find_buffer(server_id, &chan) {
-                    self.buffers[idx].remove_user(&kicked);
-                    let by = sender_nick.unwrap_or_else(|| "server".to_string());
-                    let suffix = format_reason(reason);
-                    self.push_system(
-                        idx,
-                        format!("<-- {kicked} was kicked from {chan} by {by}{suffix}"),
-                    );
-                }
-            }
-            Command::QUIT(reason) => {
-                if let Some(nick) = sender_nick {
-                    let should_show = self.should_show_join_part(server_id);
-                    let suffix = format_reason(reason);
-                    let affected =
-                        self.affected_server_buffers(server_id, |buf| buf.remove_user(&nick));
-                    if should_show {
-                        for idx in affected {
-                            self.push_system(idx, format!("<-- {nick} has quit{suffix}"));
-                        }
-                    }
-                }
-            }
-            Command::NICK(new_nick) => {
-                if let Some(old_nick) = sender_nick {
-                    if old_nick.eq_ignore_ascii_case(&my_nick) {
-                        self.set_nick(server_id, new_nick.clone());
-                    }
-                    let affected = self.affected_server_buffers(server_id, |buf| {
-                        buf.rename_user(&old_nick, &new_nick)
-                    });
-                    for idx in affected {
-                        self.push_system(idx, format!("* {old_nick} is now known as {new_nick}"));
-                    }
-                }
-            }
-            Command::TOPIC(chan, topic) => {
-                self.set_channel_topic(server_id, &chan, topic, false);
-            }
-            Command::INVITE(invited, chan) => {
-                let by = sender_nick.unwrap_or_else(|| "someone".to_string());
-                let idx = self.target_buffer_for_server(server_id);
-                self.push_system(idx, format!("* {by} invited {invited} to {chan}"));
-            }
-            Command::ChannelMODE(chan, modes) => {
-                if let Some(idx) = self.find_buffer(server_id, &chan) {
-                    self.buffers[idx].apply_channel_modes(&modes);
-                    let by = sender_nick.unwrap_or_else(|| "server".to_string());
-                    let mode_strs: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
-                    self.push_system(
-                        idx,
-                        format!("* {by} sets mode {} on {chan}", mode_strs.join(" ")),
-                    );
-                }
-            }
-            Command::Response(resp, args) => {
-                self.handle_numeric_response(server_id, resp, args);
-            }
-            Command::Raw(code, args) => {
-                self.handle_raw_numeric(server_id, code.as_str(), args);
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_raw_numeric(&mut self, server_id: &str, code: &str, args: Vec<String>) {
-        let idx = self.target_buffer_for_server(server_id);
-        match code {
-            "330" => {
-                if args.len() >= 3 {
-                    self.push_whois(idx, &args[1], format!("is logged in as {}", args[2]));
-                }
-            }
-            "378" | "671" => self.push_whois_tail(idx, &args),
-            _ => {}
-        }
-    }
-
-    fn handle_numeric_response(&mut self, server_id: &str, resp: Response, args: Vec<String>) {
-        let srv_target = self.target_buffer_for_server(server_id);
-        match resp {
-            Response::RPL_NOTOPIC => {
-                if args.len() >= 2 {
-                    self.set_channel_topic(server_id, &args[1], None, true);
-                }
-            }
-            Response::RPL_TOPIC => {
-                if args.len() >= 3 {
-                    self.set_channel_topic(server_id, &args[1], Some(args[2..].join(" ")), false);
-                }
-            }
-            Response::RPL_NAMREPLY => {
-                if args.len() >= 4 {
-                    let idx = self.ensure_buffer(server_id, &args[2], BufferKind::Channel);
-                    self.buffers[idx]
-                        .pending_names
-                        .extend(args[3].split_whitespace().map(str::to_string));
-                }
-            }
-            Response::RPL_ENDOFNAMES => {
-                if args.len() >= 2 {
-                    if let Some(idx) = self.find_buffer(server_id, &args[1]) {
-                        let pending = std::mem::take(&mut self.buffers[idx].pending_names);
-                        self.buffers[idx].users = pending;
-                        self.buffers[idx].sort_users();
-                    }
-                }
-            }
-            Response::RPL_WHOISUSER => {
-                if args.len() >= 6 {
-                    let real = args[5..].join(" ");
-                    self.push_whois(srv_target, &args[1], format!("({}@{}): {real}", args[2], args[3]));
-                }
-            }
-            Response::RPL_WHOISSERVER => {
-                if args.len() >= 4 {
-                    let info = args[3..].join(" ");
-                    self.push_whois(srv_target, &args[1], format!("server: {} ({info})", args[2]));
-                }
-            }
-            Response::RPL_WHOISOPERATOR => self.push_whois_tail(srv_target, &args),
-            Response::RPL_WHOISIDLE => {
-                if args.len() >= 3 {
-                    self.push_whois(srv_target, &args[1], format!("idle: {}s", args[2]));
-                }
-            }
-            Response::RPL_WHOISCHANNELS => {
-                if args.len() >= 3 {
-                    self.push_whois(srv_target, &args[1], format!("channels: {}", args[2..].join(" ")));
-                }
-            }
-            Response::RPL_ENDOFWHOIS => {
-                if args.len() >= 2 {
-                    self.push_whois(srv_target, &args[1], "End of WHOIS");
-                }
-            }
-            Response::RPL_UNAWAY | Response::RPL_NOWAWAY => {
-                self.push_system(srv_target, format!("* {}", trailing_text(&args)));
-            }
-            Response::RPL_LIST => {
-                if args.len() >= 3 {
-                    let topic = if args.len() >= 4 {
-                        args[3..].join(" ")
-                    } else {
-                        String::new()
-                    };
-                    self.push_system(
-                        srv_target,
-                        format!("* [list] {} ({}): {topic}", args[1], args[2]),
-                    );
-                }
-            }
-            Response::RPL_LISTEND => {
-                self.push_system(srv_target, "* [list] End of /LIST");
-            }
-            Response::ERR_NICKNAMEINUSE => {
-                let current = self.nick_for(server_id).to_string();
-                let fallback = format!("{current}_");
-                self.set_nick(server_id, fallback.clone());
-                if let Some(sender) = self.sender_for(server_id) {
-                    let _ = sender.send(Command::NICK(fallback.clone()));
-                }
-                let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
-                self.push_error(
-                    idx,
-                    format!("! Nickname '{current}' in use; switching to '{fallback}'"),
-                );
-            }
-            Response::RPL_WELCOME
-            | Response::RPL_YOURHOST
-            | Response::RPL_CREATED
-            | Response::RPL_MOTDSTART
-            | Response::RPL_MOTD
-            | Response::RPL_ENDOFMOTD
-            | Response::ERR_NOMOTD => {
-                if let Some(srv_idx) = self.find_server_buffer(server_id) {
-                    self.push_system(srv_idx, trailing_text(&args));
-                }
-                if matches!(resp, Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD) {
-                    self.join_server_channels(server_id);
-                }
-            }
-            _ if resp.is_error() => {
-                self.push_error(srv_target, format!("! {}", trailing_text(&args)));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn trailing_text(args: &[String]) -> String {
-    if args.len() > 1 {
-        args[1..].join(" ")
-    } else {
-        args.join(" ")
-    }
-}
-
-fn format_reason(reason: Option<String>) -> String {
-    reason.map(|r| format!(" ({r})")).unwrap_or_default()
-}
-
-fn extract_nick(prefix: &Option<Prefix>) -> Option<String> {
-    match prefix {
-        Some(Prefix::Nickname(nick, _, _)) => Some(nick.clone()),
-        Some(Prefix::ServerName(srv)) => Some(srv.clone()),
-        None => None,
-    }
-}
-
-fn strip_ctcp_action(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("\x01ACTION ")?;
-    Some(rest.strip_suffix('\x01').unwrap_or(rest))
-}
-
-pub fn contains_nick_mention(text: &str, nick: &str) -> bool {
-    let nick_clean = strip_user_prefix(nick).1.trim();
-    if nick_clean.is_empty() {
-        return false;
-    }
-
-    let text_lower = text.to_ascii_lowercase();
-    let nick_lower = nick_clean.to_ascii_lowercase();
-    let is_nick_char = |b: u8| {
-        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'[' | b']' | b'{' | b'}' | b'\\' | b'|' | b'^' | b'`')
-    };
-
-    let text_bytes = text_lower.as_bytes();
-    let nick_len = nick_lower.len();
-
-    for (pos, _) in text_lower.match_indices(&nick_lower) {
-        let before_ok = pos == 0 || !is_nick_char(text_bytes[pos - 1]);
-        let after_pos = pos + nick_len;
-        let after_ok = after_pos >= text_bytes.len() || !is_nick_char(text_bytes[after_pos]);
-        if before_ok && after_ok {
-            return true;
-        }
-    }
-
-    false
-}
-
-#[cfg(not(test))]
-fn send_desktop_notification(summary: &str, body: &str) {
-    let _ = notify_rust::Notification::new()
-        .appname("ronf")
-        .summary(summary)
-        .body(body)
-        .icon("user-available")
-        .show();
-}
-
-#[cfg(test)]
-fn send_desktop_notification(_summary: &str, _body: &str) {}
-
-fn prev_char_boundary(s: &str, byte_idx: usize) -> usize {
-    s[..byte_idx]
-        .char_indices()
-        .next_back()
-        .map(|(i, _)| i)
-        .unwrap_or(0)
-}
-
-fn next_char_boundary(s: &str, byte_idx: usize) -> usize {
-    let mut iter = s[byte_idx..].char_indices();
-    iter.next();
-    iter.next()
-        .map(|(offset, _)| byte_idx + offset)
-        .unwrap_or(s.len())
-}
-
-fn sanitize_log_component(raw: &str, allow_chan_prefix: bool) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric()
-                || matches!(c, '-' | '_')
-                || (allow_chan_prefix && matches!(c, '#' | '&'))
-            {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn server_log_dir(base_dir: &Path, server_id: &str) -> PathBuf {
-    base_dir.join(sanitize_log_component(server_id, false))
-}
-
-fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
-    let safe_buf = sanitize_log_component(buf_name, true);
-    server_log_dir(base_dir, server_id).join(format!("{safe_buf}.log"))
-}
-
-fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
-    let path = buffer_log_path(base_dir, server_id, buf_name);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        match (&line.kind, &line.sender) {
-            (LineKind::Action, Some(sender)) => {
-                let _ = writeln!(file, "[{}] * {} {}", line.timestamp, sender, line.content);
-            }
-            (_, Some(sender)) => {
-                let _ = writeln!(file, "[{}] <{}> {}", line.timestamp, sender, line.content);
-            }
-            (_, None) => {
-                let _ = writeln!(file, "[{}] {}", line.timestamp, line.content);
-            }
-        }
-    }
-}
-
-fn parse_log_line(raw: &str) -> Option<ChatLine> {
-    let rest = raw.strip_prefix('[')?;
-    let (ts, after_ts) = rest.split_once("] ")?;
-    if let Some(action_rest) = after_ts.strip_prefix("* ") {
-        let (actor, act_text) = action_rest.split_once(' ')?;
-        Some(ChatLine {
-            timestamp: ts.to_string(),
-            sender: Some(actor.to_string()),
-            content: act_text.to_string(),
-            kind: LineKind::Action,
-        })
-    } else if let Some(nick_rest) = after_ts.strip_prefix('<') {
-        let (sender, msg_text) = nick_rest.split_once("> ")?;
-        Some(ChatLine {
-            timestamp: ts.to_string(),
-            sender: Some(sender.to_string()),
-            content: msg_text.to_string(),
-            kind: LineKind::Normal,
-        })
-    } else {
-        None
-    }
-}
-
-fn load_more_buffer_history(base_dir: &Path, buf: &mut Buffer, limit: usize) -> usize {
-    if buf.kind == BufferKind::Server || limit == 0 || buf.history_cursor == Some(0) {
-        return 0;
-    }
-    let path = buffer_log_path(base_dir, &buf.server_id, &buf.name);
-    let Ok(content) = fs::read_to_string(path) else {
-        buf.history_cursor = Some(0);
-        return 0;
-    };
-    let all_lines: Vec<&str> = content.lines().collect();
-    let end = buf
-        .history_cursor
-        .unwrap_or(all_lines.len())
-        .min(all_lines.len());
-    if end == 0 {
-        buf.history_cursor = Some(0);
-        return 0;
-    }
-
-    let mut batch = Vec::with_capacity(limit.min(end));
-    let mut new_cursor = 0usize;
-    for idx in (0..end).rev() {
-        if let Some(line) = parse_log_line(all_lines[idx]) {
-            batch.push(line);
-            if batch.len() == limit {
-                new_cursor = idx;
-                break;
-            }
-        }
-    }
-
-    buf.history_cursor = Some(new_cursor);
-    batch.reverse();
-    let loaded = batch.len();
-    if loaded > 0 {
-        buf.messages.splice(0..0, batch);
-    }
-    loaded
-}
-
-fn discover_dm_buffers(
-    base_dir: &Path,
-    server_id: &str,
-    existing: &[Buffer],
-    limit: usize,
-) -> Vec<Buffer> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let srv_dir = server_log_dir(base_dir, server_id);
-    let Ok(entries) = fs::read_dir(srv_dir) else {
-        return Vec::new();
-    };
-
-    let mut dm_names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("log") {
-                return None;
-            }
-            let stem = path.file_stem()?.to_str()?.to_string();
-            if stem.is_empty() || is_channel_name(&stem) {
-                return None;
-            }
-            let already_exists = existing.iter().any(|b| {
-                b.server_id.eq_ignore_ascii_case(server_id) && b.name.eq_ignore_ascii_case(&stem)
-            });
-            (!already_exists).then_some(stem)
-        })
-        .collect();
-
-    dm_names.sort_by_key(|a| a.to_ascii_lowercase());
-
-    let mut dm_buffers = Vec::new();
-    for name in dm_names {
-        let mut dm_buf = Buffer::new(server_id.to_string(), name, BufferKind::DirectMessage);
-        if load_more_buffer_history(base_dir, &mut dm_buf, limit) > 0 {
-            dm_buffers.push(dm_buf);
-        }
-    }
-    dm_buffers
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use irc::proto::{ChannelMode, Mode, Prefix, Response};
+
     use super::*;
+    use crate::buffer::contains_nick_mention;
 
     fn test_app() -> App {
         let toml = r##"
@@ -2200,98 +893,6 @@ mod tests {
         "##;
         let cfg = AppConfig::from_toml_str(toml).unwrap();
         App::from_config(&cfg)
-    }
-
-    #[test]
-    fn parses_slash_commands_and_plain_text() {
-        assert_eq!(parse_user_command("/help"), Some(UserCommand::Help));
-        assert_eq!(
-            parse_user_command("/reconnect"),
-            Some(UserCommand::Reconnect)
-        );
-        assert_eq!(
-            parse_user_command("/away lunch"),
-            Some(UserCommand::Away(Some("lunch".to_string())))
-        );
-        assert_eq!(parse_user_command("/motd"), Some(UserCommand::Motd));
-        assert_eq!(
-            parse_user_command("/buffer #rust"),
-            Some(UserCommand::Buffer("#rust".to_string()))
-        );
-        assert_eq!(
-            parse_user_command("/op alice"),
-            Some(UserCommand::Mode {
-                target: None,
-                args: "+o alice".to_string(),
-                channel_only: true,
-            })
-        );
-        assert_eq!(
-            parse_user_command("/ban *!*@bad.host"),
-            Some(UserCommand::Mode {
-                target: None,
-                args: "+b *!*@bad.host".to_string(),
-                channel_only: true,
-            })
-        );
-        assert_eq!(
-            parse_user_command("/kick bob spamming"),
-            Some(UserCommand::Kick {
-                nick: "bob".to_string(),
-                reason: Some("spamming".to_string())
-            })
-        );
-        assert_eq!(
-            parse_user_command("/invite alice #rust"),
-            Some(UserCommand::Invite {
-                nick: "alice".to_string(),
-                channel: Some("#rust".to_string())
-            })
-        );
-        assert_eq!(
-            parse_user_command("/raw PRIVMSG NickServ :IDENTIFY pass"),
-            Some(UserCommand::Raw("PRIVMSG NickServ :IDENTIFY pass".to_string()))
-        );
-        assert_eq!(
-            parse_user_command("/quote PING 123"),
-            Some(UserCommand::Raw("PING 123".to_string()))
-        );
-        assert_eq!(parse_user_command("/clear"), Some(UserCommand::Clear));
-        assert_eq!(
-            parse_user_command("/whois alice"),
-            Some(UserCommand::Whois("alice".to_string()))
-        );
-        assert_eq!(parse_user_command("/topic"), Some(UserCommand::Topic(None)));
-        assert_eq!(
-            parse_user_command("/topic Rust 2024 edition"),
-            Some(UserCommand::Topic(Some("Rust 2024 edition".to_string())))
-        );
-        assert_eq!(
-            parse_user_command("/join #rust"),
-            Some(UserCommand::Join("#rust".to_string()))
-        );
-        assert_eq!(
-            parse_user_command("/msg alice hello there"),
-            Some(UserCommand::Msg {
-                target: "alice".to_string(),
-                text: "hello there".to_string()
-            })
-        );
-        assert_eq!(
-            parse_user_command("/query alice"),
-            Some(UserCommand::Query {
-                target: "alice".to_string(),
-                text: None
-            })
-        );
-        assert_eq!(
-            parse_user_command("/quit bye"),
-            Some(UserCommand::Quit(Some("bye".to_string())))
-        );
-        assert_eq!(
-            parse_user_command("plain chat line"),
-            Some(UserCommand::Say("plain chat line".to_string()))
-        );
     }
 
     #[test]
@@ -2355,7 +956,6 @@ mod tests {
             vec!["@+ferris", "+bob", "alice", "charlie"]
         );
 
-        // NICK change preserves @+ role prefixes
         app.handle_irc_message(
             "libera",
             Message {
@@ -2369,7 +969,6 @@ mod tests {
             vec!["@+ferris_bot", "+bob", "alice", "charlie"]
         );
 
-        // PART removes user
         app.handle_irc_message(
             "libera",
             Message {
@@ -2383,7 +982,6 @@ mod tests {
             vec!["@+ferris_bot", "+bob", "charlie"]
         );
 
-        // ChannelMODE +o charlie promotes charlie to @charlie and re-sorts
         app.handle_irc_message(
             "libera",
             Message {
@@ -2400,7 +998,6 @@ mod tests {
             vec!["@charlie", "@+ferris_bot", "+bob"]
         );
 
-        // ChannelMODE -o ferris_bot demotes ferris_bot from @+ to +ferris_bot (preserving voice!)
         app.handle_irc_message(
             "libera",
             Message {
@@ -2425,26 +1022,22 @@ mod tests {
         app.select_buffer(rust_idx);
         app.buffers[rust_idx].users = vec!["@ferris".into(), "alice".into(), "alex".into()];
 
-        // Start of line nick completion -> adds ": " and cycles on second Tab
         app.input.set_text("al");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input.text, "alice: ");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input.text, "alex: ");
 
-        // Mid-line nick completion -> adds " "
         app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.input.set_text("hello fe");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input.text, "hello ferris ");
 
-        // Slash command completion
         app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.input.set_text("/j");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input.text, "/join ");
 
-        // Multi-byte Unicode whitespace (U+00A0 NO-BREAK SPACE) does not panic on Tab or Ctrl+W
         app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.input.set_text("ab\u{00a0}al");
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -2475,7 +1068,6 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.input.text, "draft");
 
-        // Mark #linux unread and press Alt+A
         let linux_idx = app.find_buffer("libera", "#linux").unwrap();
         app.buffers[linux_idx].unread = true;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
@@ -2515,7 +1107,6 @@ mod tests {
         let mut app = test_app();
         let rust_idx = app.find_buffer("libera", "#rust").unwrap();
 
-        // Mention in inactive #rust channel sets highlight = true
         app.handle_irc_message(
             "libera",
             Message {
@@ -2526,11 +1117,9 @@ mod tests {
         );
         assert!(app.buffers[rust_idx].highlight);
 
-        // Selecting #rust clears highlight
         app.select_buffer(rust_idx);
         assert!(!app.buffers[rust_idx].highlight);
 
-        // Incoming new DM creates buffer and sets highlight = true
         app.handle_irc_message(
             "libera",
             Message {
@@ -2689,7 +1278,6 @@ mod tests {
             },
         );
 
-        // Reload new App instance from same config and verify history is loaded
         let app2 = App::from_config(&cfg);
         let rust_idx = app2.find_buffer("libera", "#rust").unwrap();
         assert_eq!(app2.buffers[rust_idx].messages.len(), 1);
@@ -2720,7 +1308,6 @@ mod tests {
         let cfg = AppConfig::from_toml_str(&toml).unwrap();
         let mut app = App::from_config(&cfg);
 
-        // Log 5 channel messages and 2 DM messages from alice
         for i in 1..=5 {
             app.handle_irc_message(
                 "libera",
@@ -2742,7 +1329,6 @@ mod tests {
             );
         }
 
-        // Start a fresh App instance with history_limit = 2
         let mut app2 = App::from_config(&cfg);
         let rust_idx = app2.find_buffer("libera", "#rust").unwrap();
         assert_eq!(
@@ -2754,7 +1340,6 @@ mod tests {
             vec!["msg 4", "msg 5"]
         );
 
-        // Past DM buffer with bob is automatically restored at startup without unread/highlight
         let bob_idx = app2.find_buffer("libera", "bob").expect("bob DM restored");
         assert_eq!(app2.buffers[bob_idx].kind, BufferKind::DirectMessage);
         assert!(!app2.buffers[bob_idx].unread);
@@ -2768,7 +1353,6 @@ mod tests {
             vec!["dm 1", "dm 2"]
         );
 
-        // Receive a live message in #rust during the new session (appends to log on disk)
         app2.handle_irc_message(
             "libera",
             Message {
@@ -2787,7 +1371,6 @@ mod tests {
             vec!["msg 4", "msg 5", "msg 6"]
         );
 
-        // First PgUp at the top prepends the previous batch of 2 older messages ("msg 2", "msg 3")
         app2.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(
             app2.buffers[rust_idx]
@@ -2799,7 +1382,6 @@ mod tests {
         );
         assert_eq!(app2.buffers[rust_idx].scroll_offset, 4);
 
-        // Second PgUp prepends the remaining oldest message ("msg 1") and reaches cursor 0
         app2.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(
             app2.buffers[rust_idx]
@@ -2812,7 +1394,6 @@ mod tests {
         assert_eq!(app2.buffers[rust_idx].history_cursor, Some(0));
         assert_eq!(app2.buffers[rust_idx].scroll_offset, 5);
 
-        // Verify history_limit = 0 loads no history and restores no DM buffers
         let zero_toml = format!(
             r##"
             default_nickname = "irc_user"
@@ -2848,7 +1429,6 @@ mod tests {
         let mut app = App::from_config(&cfg);
         let rust_idx = app.find_buffer("libera", "#rust").unwrap();
 
-        // JOIN adds user to users list, but doesn't post system message
         app.handle_irc_message(
             "libera",
             Message {
@@ -2860,7 +1440,6 @@ mod tests {
         assert_eq!(app.buffers[rust_idx].users, vec!["alice"]);
         assert_eq!(app.buffers[rust_idx].messages.len(), 0);
 
-        // PART removes user, but doesn't post system message
         app.handle_irc_message(
             "libera",
             Message {
@@ -2872,7 +1451,6 @@ mod tests {
         assert_eq!(app.buffers[rust_idx].users.len(), 0);
         assert_eq!(app.buffers[rust_idx].messages.len(), 0);
 
-        // QUIT removes user, but doesn't post system message
         app.buffers[rust_idx].add_user("bob");
         app.handle_irc_message(
             "libera",
