@@ -1063,6 +1063,62 @@ impl App {
         }
     }
 
+    pub fn push_system(&mut self, idx: usize, msg: impl Into<String>) {
+        self.push_to_buffer(idx, ChatLine::new(None, msg, LineKind::System));
+    }
+
+    pub fn push_error(&mut self, idx: usize, msg: impl Into<String>) {
+        self.push_to_buffer(idx, ChatLine::new(None, msg, LineKind::Error));
+    }
+
+    fn require_active_channel(&mut self, err_msg: &str) -> Option<String> {
+        if self.active_buf().kind != BufferKind::Channel {
+            self.push_error(self.active_buffer, err_msg);
+            return None;
+        }
+        Some(self.active_buf().name.clone())
+    }
+
+    fn require_chat_target(&mut self, server_buf_err: &str) -> Option<String> {
+        if self.active_buf().kind == BufferKind::Server {
+            self.push_error(self.active_buffer, server_buf_err);
+            return None;
+        }
+        if self.active_buf().parted {
+            self.push_error(
+                self.active_buffer,
+                "Cannot send to parted channel (use /join to rejoin)",
+            );
+            return None;
+        }
+        Some(self.active_buf().name.clone())
+    }
+
+    fn send_privmsg_and_echo(
+        &mut self,
+        server_id: &str,
+        buf_idx: usize,
+        target: &str,
+        wire_override: Option<&str>,
+        display_text: String,
+        kind: LineKind,
+    ) -> bool {
+        let wire = wire_override.unwrap_or(&display_text);
+        if let Some(sender) = self.sender_for(server_id) {
+            if sender.send_privmsg(target, wire).is_err() {
+                self.set_sender(server_id, None);
+                self.push_error(
+                    self.active_buffer,
+                    format!("Not connected to [{server_id}]; message not sent"),
+                );
+                return false;
+            }
+        }
+        let nick = self.nick_for(server_id).to_string();
+        self.push_to_buffer(buf_idx, ChatLine::new(Some(nick), display_text, kind));
+        true
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         if self.show_help {
             self.handle_help_key_event(key);
@@ -1238,13 +1294,9 @@ impl App {
         };
 
         let Some(cmd) = parse_user_command(&line) else {
-            self.push_to_buffer(
+            self.push_error(
                 self.active_buffer,
-                ChatLine::new(
-                    None,
-                    format!("Unknown or incomplete command: {}", line.trim()),
-                    LineKind::Error,
-                ),
+                format!("Unknown or incomplete command: {}", line.trim()),
             );
             return;
         };
@@ -1270,14 +1322,10 @@ impl App {
                 self.select_buffer(idx);
             }
             UserCommand::Part(reason) => {
-                if self.active_buf().kind != BufferKind::Channel {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(None, "Cannot /part a non-channel buffer", LineKind::Error),
-                    );
+                let Some(chan) = self.require_active_channel("Cannot /part a non-channel buffer")
+                else {
                     return;
-                }
-                let chan = self.active_buf().name.clone();
+                };
                 if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::PART(chan.clone(), reason));
                 }
@@ -1285,34 +1333,39 @@ impl App {
                 buf.parted = true;
                 buf.users.clear();
                 buf.pending_names.clear();
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(None, format!("Left {chan}"), LineKind::System),
-                );
+                self.push_system(self.active_buffer, format!("Left {chan}"));
             }
             UserCommand::Msg { target, text } => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send_privmsg(&target, &text);
-                }
                 let kind = if is_channel_name(&target) {
                     BufferKind::Channel
                 } else {
                     BufferKind::DirectMessage
                 };
                 let idx = self.ensure_buffer(&server_id, &target, kind);
-                self.push_to_buffer(idx, ChatLine::new(Some(active_nick), text, LineKind::Normal));
-                self.select_buffer(idx);
+                if self.send_privmsg_and_echo(
+                    &server_id,
+                    idx,
+                    &target,
+                    None,
+                    text,
+                    LineKind::Normal,
+                ) {
+                    self.select_buffer(idx);
+                }
             }
             UserCommand::Query { target, text } => {
                 let idx = self.ensure_buffer(&server_id, &target, BufferKind::DirectMessage);
                 if let Some(msg_text) = text {
-                    if let Some(sender) = self.sender_for(&server_id) {
-                        let _ = sender.send_privmsg(&target, &msg_text);
-                    }
-                    self.push_to_buffer(
+                    if !self.send_privmsg_and_echo(
+                        &server_id,
                         idx,
-                        ChatLine::new(Some(active_nick), msg_text, LineKind::Normal),
-                    );
+                        &target,
+                        None,
+                        msg_text,
+                        LineKind::Normal,
+                    ) {
+                        return;
+                    }
                 }
                 self.select_buffer(idx);
             }
@@ -1326,81 +1379,34 @@ impl App {
                         buf.rename_user(&old_nick, &new_nick);
                     }
                 }
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(
-                        None,
-                        format!("Nickname changed to {new_nick}"),
-                        LineKind::System,
-                    ),
-                );
+                self.push_system(self.active_buffer, format!("Nickname changed to {new_nick}"));
             }
             UserCommand::Me(action) => {
-                if self.active_buf().kind == BufferKind::Server {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            "Cannot send /me in a server buffer",
-                            LineKind::Error,
-                        ),
-                    );
+                let Some(target) = self.require_chat_target("Cannot send /me in a server buffer")
+                else {
                     return;
-                }
-                if self.active_buf().parted {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            "Cannot send to parted channel (use /join to rejoin)",
-                            LineKind::Error,
-                        ),
-                    );
-                    return;
-                }
-                let target = self.active_buf().name.clone();
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let ctcp = format!("\x01ACTION {action}\x01");
-                    if sender.send_privmsg(&target, &ctcp).is_err() {
-                        self.set_sender(&server_id, None);
-                        self.push_to_buffer(
-                            self.active_buffer,
-                            ChatLine::new(
-                                None,
-                                format!("Not connected to [{server_id}]; message not sent"),
-                                LineKind::Error,
-                            ),
-                        );
-                        return;
-                    }
-                }
-                self.push_to_buffer(
+                };
+                let ctcp = format!("\x01ACTION {action}\x01");
+                self.send_privmsg_and_echo(
+                    &server_id,
                     self.active_buffer,
-                    ChatLine::new(Some(active_nick), action, LineKind::Action),
+                    &target,
+                    Some(&ctcp),
+                    action,
+                    LineKind::Action,
                 );
             }
             UserCommand::Topic(new_topic) => {
-                if self.active_buf().kind != BufferKind::Channel {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            "Cannot use /topic outside a channel buffer",
-                            LineKind::Error,
-                        ),
-                    );
+                let Some(chan) =
+                    self.require_active_channel("Cannot use /topic outside a channel buffer")
+                else {
                     return;
-                }
-                let chan = self.active_buf().name.clone();
+                };
                 if new_topic.is_none() {
                     if let Some(existing) = self.active_buf().topic.clone() {
-                        self.push_to_buffer(
+                        self.push_system(
                             self.active_buffer,
-                            ChatLine::new(
-                                None,
-                                format!("* Topic for {chan}: {existing}"),
-                                LineKind::System,
-                            ),
+                            format!("* Topic for {chan}: {existing}"),
                         );
                     }
                 }
@@ -1412,28 +1418,14 @@ impl App {
                 if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::WHOIS(None, target.clone()));
                 }
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(
-                        None,
-                        format!("* Querying WHOIS for {target}..."),
-                        LineKind::System,
-                    ),
-                );
+                self.push_system(self.active_buffer, format!("* Querying WHOIS for {target}..."));
             }
             UserCommand::Kick { nick, reason } => {
-                if self.active_buf().kind != BufferKind::Channel {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            "Cannot /kick outside a channel buffer",
-                            LineKind::Error,
-                        ),
-                    );
+                let Some(chan) =
+                    self.require_active_channel("Cannot /kick outside a channel buffer")
+                else {
                     return;
-                }
-                let chan = self.active_buf().name.clone();
+                };
                 if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::KICK(chan, nick, reason));
                 }
@@ -1445,13 +1437,9 @@ impl App {
                         self.active_buf().name.clone()
                     }
                     None => {
-                        self.push_to_buffer(
+                        self.push_error(
                             self.active_buffer,
-                            ChatLine::new(
-                                None,
-                                "Specify a channel: /invite <nick> <#channel>",
-                                LineKind::Error,
-                            ),
+                            "Specify a channel: /invite <nick> <#channel>",
                         );
                         return;
                     }
@@ -1459,13 +1447,9 @@ impl App {
                 if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::INVITE(nick.clone(), target_chan.clone()));
                 }
-                self.push_to_buffer(
+                self.push_system(
                     self.active_buffer,
-                    ChatLine::new(
-                        None,
-                        format!("* Invited {nick} to {target_chan}"),
-                        LineKind::System,
-                    ),
+                    format!("* Invited {nick} to {target_chan}"),
                 );
             }
             UserCommand::Mode {
@@ -1473,17 +1457,15 @@ impl App {
                 args,
                 channel_only,
             } => {
-                if channel_only && target.is_none() && self.active_buf().kind != BufferKind::Channel
-                {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
+                if channel_only && target.is_none() {
+                    if self
+                        .require_active_channel(
                             "Cannot use channel mode command outside a channel buffer",
-                            LineKind::Error,
-                        ),
-                    );
-                    return;
+                        )
+                        .is_none()
+                    {
+                        return;
+                    }
                 }
                 let target_name = match target {
                     Some(t) => t,
@@ -1497,13 +1479,9 @@ impl App {
                     raw_args.extend(args.split_whitespace().map(str::to_string));
                     let _ = sender.send(Command::Raw("MODE".to_string(), raw_args));
                 }
-                self.push_to_buffer(
+                self.push_system(
                     self.active_buffer,
-                    ChatLine::new(
-                        None,
-                        format!("* Mode {target_name} {args}").trim_end().to_string(),
-                        LineKind::System,
-                    ),
+                    format!("* Mode {target_name} {args}").trim_end().to_string(),
                 );
             }
             UserCommand::Away(reason) => {
@@ -1514,10 +1492,7 @@ impl App {
                     Some(r) => format!("* Marked as away: {r}"),
                     None => "* Cleared away status".to_string(),
                 };
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(None, text, LineKind::System),
-                );
+                self.push_system(self.active_buffer, text);
             }
             UserCommand::Motd => {
                 if let Some(sender) = self.sender_for(&server_id) {
@@ -1528,10 +1503,7 @@ impl App {
                 if let Some(sender) = self.sender_for(&server_id) {
                     let _ = sender.send(Command::LIST(filter, None));
                 }
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(None, "* Requesting channel list...", LineKind::System),
-                );
+                self.push_system(self.active_buffer, "* Requesting channel list...");
             }
             UserCommand::Buffer(target) => {
                 if let Ok(num) = target.parse::<usize>() {
@@ -1547,36 +1519,19 @@ impl App {
                 {
                     self.select_buffer(idx);
                 } else {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            format!("Buffer not found: {target}"),
-                            LineKind::Error,
-                        ),
-                    );
+                    self.push_error(self.active_buffer, format!("Buffer not found: {target}"));
                 }
             }
             UserCommand::Reconnect => {
                 if let Some(sender) = self.set_sender(&server_id, None) {
                     let _ = sender.send(Command::QUIT(Some("Reconnecting...".to_string())));
                 }
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(
-                        None,
-                        format!("* Reconnecting to [{server_id}]..."),
-                        LineKind::System,
-                    ),
-                );
+                self.push_system(self.active_buffer, format!("* Reconnecting to [{server_id}]..."));
             }
             UserCommand::Ignore(maybe_nick) => match maybe_nick {
                 Some(nick) => {
                     self.ignored_nicks.insert(nick.to_ascii_lowercase());
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(None, format!("* Ignoring {nick}"), LineKind::System),
-                    );
+                    self.push_system(self.active_buffer, format!("* Ignoring {nick}"));
                 }
                 None => {
                     let msg = if self.ignored_nicks.is_empty() {
@@ -1586,18 +1541,12 @@ impl App {
                             self.ignored_nicks.iter().map(String::as_str).collect();
                         format!("* Ignored users: {}", list.join(", "))
                     };
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(None, msg, LineKind::System),
-                    );
+                    self.push_system(self.active_buffer, msg);
                 }
             },
             UserCommand::Unignore(nick) => {
                 self.ignored_nicks.remove(&nick.to_ascii_lowercase());
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(None, format!("* Unignored {nick}"), LineKind::System),
-                );
+                self.push_system(self.active_buffer, format!("* Unignored {nick}"));
             }
             UserCommand::Search(query) => {
                 let q_lower = query.to_ascii_lowercase();
@@ -1619,20 +1568,13 @@ impl App {
                     .collect();
 
                 if matches.is_empty() {
-                    self.push_to_buffer(
+                    self.push_system(
                         self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            format!("* [search] No matches for '{query}'"),
-                            LineKind::System,
-                        ),
+                        format!("* [search] No matches for '{query}'"),
                     );
                 } else {
                     for line in matches {
-                        self.push_to_buffer(
-                            self.active_buffer,
-                            ChatLine::new(None, line, LineKind::System),
-                        );
+                        self.push_system(self.active_buffer, line);
                     }
                 }
             }
@@ -1648,10 +1590,7 @@ impl App {
                         }
                     }
                 }
-                self.push_to_buffer(
-                    self.active_buffer,
-                    ChatLine::new(None, format!("* >> {raw_cmd}"), LineKind::System),
-                );
+                self.push_system(self.active_buffer, format!("* >> {raw_cmd}"));
             }
             UserCommand::Clear => {
                 let buf = self.active_buf_mut();
@@ -1661,10 +1600,7 @@ impl App {
             }
             UserCommand::Close => {
                 if self.active_buf().kind == BufferKind::Server {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(None, "Cannot /close a server root buffer", LineKind::Error),
-                    );
+                    self.push_error(self.active_buffer, "Cannot /close a server root buffer");
                     return;
                 }
                 if self.active_buf().kind == BufferKind::Channel {
@@ -1686,46 +1622,18 @@ impl App {
                 self.quit_all(reason);
             }
             UserCommand::Say(text) => {
-                if self.active_buf().kind == BufferKind::Server {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            "Cannot send plain chat to server buffer (use /join <#channel> or /msg <nick> <text>)",
-                            LineKind::Error,
-                        ),
-                    );
+                let Some(target) = self.require_chat_target(
+                    "Cannot send plain chat to server buffer (use /join <#channel> or /msg <nick> <text>)",
+                ) else {
                     return;
-                }
-                if self.active_buf().parted {
-                    self.push_to_buffer(
-                        self.active_buffer,
-                        ChatLine::new(
-                            None,
-                            "Cannot send to parted channel (use /join to rejoin)",
-                            LineKind::Error,
-                        ),
-                    );
-                    return;
-                }
-                let target = self.active_buf().name.clone();
-                if let Some(sender) = self.sender_for(&server_id) {
-                    if sender.send_privmsg(&target, &text).is_err() {
-                        self.set_sender(&server_id, None);
-                        self.push_to_buffer(
-                            self.active_buffer,
-                            ChatLine::new(
-                                None,
-                                format!("Not connected to [{server_id}]; message not sent"),
-                                LineKind::Error,
-                            ),
-                        );
-                        return;
-                    }
-                }
-                self.push_to_buffer(
+                };
+                self.send_privmsg_and_echo(
+                    &server_id,
                     self.active_buffer,
-                    ChatLine::new(Some(active_nick), text, LineKind::Normal),
+                    &target,
+                    None,
+                    text,
+                    LineKind::Normal,
                 );
             }
         }
