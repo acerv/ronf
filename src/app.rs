@@ -411,6 +411,24 @@ pub enum UserCommand {
     Say(String),
 }
 
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn first_word(s: &str) -> Option<&str> {
+    s.split_whitespace().next()
+}
+
+fn split_first_arg(s: &str) -> Option<(String, Option<String>)> {
+    if s.is_empty() {
+        return None;
+    }
+    match s.split_once(char::is_whitespace) {
+        Some((first, tail)) => Some((first.to_string(), non_empty(tail.trim()))),
+        None => Some((s.to_string(), None)),
+    }
+}
+
 pub fn parse_user_command(input: &str) -> Option<UserCommand> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -429,248 +447,80 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
     match cmd.as_str() {
         "/help" | "/h" | "/?" => Some(UserCommand::Help),
         "/join" | "/j" => {
-            if rest.is_empty() {
-                None
+            let chan = first_word(rest)?;
+            let normalized = if is_channel_name(chan) {
+                chan.to_string()
             } else {
-                let chan = rest.split_whitespace().next().unwrap_or(rest);
-                let normalized = if is_channel_name(chan) {
-                    chan.to_string()
-                } else {
-                    format!("#{chan}")
-                };
-                Some(UserCommand::Join(normalized))
-            }
-        }
-        "/part" | "/leave" => {
-            let reason = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.to_string())
+                format!("#{chan}")
             };
-            Some(UserCommand::Part(reason))
+            Some(UserCommand::Join(normalized))
         }
+        "/part" | "/leave" => Some(UserCommand::Part(non_empty(rest))),
         "/msg" => {
-            let (target, text) = rest.split_once(char::is_whitespace)?;
-            let text = text.trim();
-            if target.is_empty() || text.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Msg {
-                    target: target.to_string(),
-                    text: text.to_string(),
-                })
-            }
+            let (target, Some(text)) = split_first_arg(rest)? else {
+                return None;
+            };
+            Some(UserCommand::Msg { target, text })
         }
         "/query" => {
-            if rest.is_empty() {
-                None
-            } else if let Some((target, text)) = rest.split_once(char::is_whitespace) {
-                let text = text.trim();
-                Some(UserCommand::Query {
-                    target: target.to_string(),
-                    text: if text.is_empty() {
-                        None
-                    } else {
-                        Some(text.to_string())
-                    },
-                })
-            } else {
-                Some(UserCommand::Query {
-                    target: rest.to_string(),
-                    text: None,
-                })
-            }
+            let (target, text) = split_first_arg(rest)?;
+            Some(UserCommand::Query { target, text })
         }
-        "/nick" => {
-            let new_nick = rest.split_whitespace().next()?;
-            if new_nick.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Nick(new_nick.to_string()))
-            }
-        }
-        "/me" => {
-            if rest.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Me(rest.to_string()))
-            }
-        }
-        "/topic" => {
-            let new_topic = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.to_string())
-            };
-            Some(UserCommand::Topic(new_topic))
-        }
-        "/whois" => {
-            let target = rest.split_whitespace().next()?;
-            if target.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Whois(target.to_string()))
-            }
-        }
+        "/nick" => Some(UserCommand::Nick(first_word(rest)?.to_string())),
+        "/me" => non_empty(rest).map(UserCommand::Me),
+        "/topic" => Some(UserCommand::Topic(non_empty(rest))),
+        "/whois" => Some(UserCommand::Whois(first_word(rest)?.to_string())),
         "/kick" => {
-            if rest.is_empty() {
-                None
-            } else if let Some((nick, reason)) = rest.split_once(char::is_whitespace) {
-                let reason = reason.trim();
-                Some(UserCommand::Kick {
-                    nick: nick.to_string(),
-                    reason: if reason.is_empty() {
-                        None
-                    } else {
-                        Some(reason.to_string())
-                    },
-                })
-            } else {
-                Some(UserCommand::Kick {
-                    nick: rest.to_string(),
-                    reason: None,
-                })
-            }
+            let (nick, reason) = split_first_arg(rest)?;
+            Some(UserCommand::Kick { nick, reason })
         }
         "/invite" => {
-            if rest.is_empty() {
-                None
-            } else if let Some((nick, chan)) = rest.split_once(char::is_whitespace) {
-                let chan = chan.trim();
-                Some(UserCommand::Invite {
-                    nick: nick.to_string(),
-                    channel: if chan.is_empty() {
-                        None
-                    } else {
-                        Some(chan.to_string())
-                    },
-                })
-            } else {
-                Some(UserCommand::Invite {
-                    nick: rest.to_string(),
-                    channel: None,
-                })
-            }
+            let (nick, channel) = split_first_arg(rest)?;
+            Some(UserCommand::Invite { nick, channel })
         }
         "/mode" => {
-            if rest.is_empty() {
-                None
+            let (first, rem) = split_first_arg(rest)?;
+            if is_channel_name(&first) {
+                Some(UserCommand::Mode {
+                    target: Some(first),
+                    args: rem.unwrap_or_default(),
+                    channel_only: false,
+                })
             } else {
-                let mut parts = rest.splitn(2, char::is_whitespace);
-                let first = parts.next().unwrap();
-                let rem = parts.next().map(str::trim).unwrap_or("");
-                if is_channel_name(first) {
-                    Some(UserCommand::Mode {
-                        target: Some(first.to_string()),
-                        args: rem.to_string(),
-                        channel_only: false,
-                    })
-                } else {
-                    Some(UserCommand::Mode {
-                        target: None,
-                        args: rest.to_string(),
-                        channel_only: false,
-                    })
-                }
+                Some(UserCommand::Mode {
+                    target: None,
+                    args: rest.to_string(),
+                    channel_only: false,
+                })
             }
         }
-        "/ban" => {
-            let mask = rest.split_whitespace().next()?;
-            Some(UserCommand::Mode {
-                target: None,
-                args: format!("+b {mask}"),
-                channel_only: true,
-            })
-        }
-        "/op" => {
-            let nick = rest.split_whitespace().next()?;
-            Some(UserCommand::Mode {
-                target: None,
-                args: format!("+o {nick}"),
-                channel_only: true,
-            })
-        }
-        "/deop" => {
-            let nick = rest.split_whitespace().next()?;
-            Some(UserCommand::Mode {
-                target: None,
-                args: format!("-o {nick}"),
-                channel_only: true,
-            })
-        }
-        "/voice" => {
-            let nick = rest.split_whitespace().next()?;
-            Some(UserCommand::Mode {
-                target: None,
-                args: format!("+v {nick}"),
-                channel_only: true,
-            })
-        }
-        "/devoice" => {
-            let nick = rest.split_whitespace().next()?;
-            Some(UserCommand::Mode {
-                target: None,
-                args: format!("-v {nick}"),
-                channel_only: true,
-            })
-        }
-        "/away" => {
-            let msg = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.to_string())
+        "/ban" | "/op" | "/deop" | "/voice" | "/devoice" => {
+            let arg = first_word(rest)?;
+            let flag = match cmd.as_str() {
+                "/ban" => "+b",
+                "/op" => "+o",
+                "/deop" => "-o",
+                "/voice" => "+v",
+                _ => "-v",
             };
-            Some(UserCommand::Away(msg))
+            Some(UserCommand::Mode {
+                target: None,
+                args: format!("{flag} {arg}"),
+                channel_only: true,
+            })
         }
+        "/away" => Some(UserCommand::Away(non_empty(rest))),
         "/motd" => Some(UserCommand::Motd),
-        "/list" => {
-            let filter = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.to_string())
-            };
-            Some(UserCommand::List(filter))
-        }
-        "/buffer" | "/b" => {
-            if rest.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Buffer(rest.to_string()))
-            }
-        }
+        "/list" => Some(UserCommand::List(non_empty(rest))),
+        "/buffer" | "/b" => non_empty(rest).map(UserCommand::Buffer),
         "/reconnect" => Some(UserCommand::Reconnect),
-        "/ignore" => {
-            let nick = rest.split_whitespace().next().map(str::to_string);
-            Some(UserCommand::Ignore(nick))
-        }
-        "/unignore" => {
-            let nick = rest.split_whitespace().next()?;
-            Some(UserCommand::Unignore(nick.to_string()))
-        }
-        "/search" => {
-            if rest.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Search(rest.to_string()))
-            }
-        }
-        "/raw" | "/quote" => {
-            if rest.is_empty() {
-                None
-            } else {
-                Some(UserCommand::Raw(rest.to_string()))
-            }
-        }
+        "/ignore" => Some(UserCommand::Ignore(first_word(rest).map(str::to_string))),
+        "/unignore" => Some(UserCommand::Unignore(first_word(rest)?.to_string())),
+        "/search" => non_empty(rest).map(UserCommand::Search),
+        "/raw" | "/quote" => non_empty(rest).map(UserCommand::Raw),
         "/clear" => Some(UserCommand::Clear),
         "/close" => Some(UserCommand::Close),
-        "/quit" | "/exit" => {
-            let reason = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.to_string())
-            };
-            Some(UserCommand::Quit(reason))
-        }
+        "/quit" | "/exit" => Some(UserCommand::Quit(non_empty(rest))),
         _ => None,
     }
 }
