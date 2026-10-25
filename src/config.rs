@@ -83,30 +83,26 @@ impl ServerConfig {
     }
 
     pub fn resolve_password(&self) -> Result<Option<String>> {
-        if let Some(cmd) = &self.password_command {
-            return Ok(Some(run_secret_command(cmd)?));
-        }
-        Ok(self.password.clone())
+        resolve_secret(&self.password, &self.password_command)
     }
 
     pub fn resolve_nick_password(&self) -> Result<Option<String>> {
-        if let Some(cmd) = &self.nick_password_command {
-            return Ok(Some(run_secret_command(cmd)?));
-        }
-        Ok(self.nick_password.clone())
+        resolve_secret(&self.nick_password, &self.nick_password_command)
     }
 
-    pub fn validate_structure(&self, fallback_nick: Option<&str>) -> Result<()> {
+    fn validated_nickname(&self, fallback_nick: Option<&str>) -> Result<String> {
         if self.server.trim().is_empty() {
             bail!("Server hostname cannot be empty");
         }
-        self.effective_nickname(fallback_nick)?;
-        Ok(())
+        self.effective_nickname(fallback_nick)
+    }
+
+    pub fn validate_structure(&self, fallback_nick: Option<&str>) -> Result<()> {
+        self.validated_nickname(fallback_nick).map(|_| ())
     }
 
     pub fn to_irc_config(&self, fallback_nick: Option<&str>) -> Result<IrcConfig> {
-        self.validate_structure(fallback_nick)?;
-        let nickname = self.effective_nickname(fallback_nick)?;
+        let nickname = self.validated_nickname(fallback_nick)?;
         let use_tls = self.effective_tls();
         let port = self.effective_port();
         let password = self.resolve_password()?;
@@ -125,6 +121,13 @@ impl ServerConfig {
             client_cert_path: self.client_cert_path.clone(),
             ..IrcConfig::default()
         })
+    }
+}
+
+fn resolve_secret(plain: &Option<String>, cmd: &Option<String>) -> Result<Option<String>> {
+    match cmd {
+        Some(c) => Ok(Some(run_secret_command(c)?)),
+        None => Ok(plain.clone()),
     }
 }
 
@@ -179,16 +182,7 @@ impl AppConfig {
     }
 
     pub fn user_config_path() -> Option<PathBuf> {
-        if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
-            let trimmed = xdg.trim();
-            if !trimmed.is_empty() {
-                return Some(PathBuf::from(trimmed).join("ronf").join("config.toml"));
-            }
-        }
-        env::var("HOME")
-            .ok()
-            .filter(|h| !h.trim().is_empty())
-            .map(|home| PathBuf::from(home).join(".config").join("ronf").join("config.toml"))
+        xdg_path("XDG_CONFIG_HOME", &[".config"], &["ronf", "config.toml"])
     }
 
     pub fn effective_log_dir(&self) -> Option<PathBuf> {
@@ -209,18 +203,7 @@ impl AppConfig {
     }
 
     pub fn default_log_dir() -> Option<PathBuf> {
-        if let Ok(xdg_data) = env::var("XDG_DATA_HOME") {
-            if !xdg_data.trim().is_empty() {
-                return Some(PathBuf::from(xdg_data).join("ronf").join("logs"));
-            }
-        }
-        env::var("HOME").ok().map(|h| {
-            PathBuf::from(h)
-                .join(".local")
-                .join("share")
-                .join("ronf")
-                .join("logs")
-        })
+        xdg_path("XDG_DATA_HOME", &[".local", "share"], &["ronf", "logs"])
     }
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
@@ -257,6 +240,26 @@ impl AppConfig {
 
         Ok(())
     }
+}
+
+fn xdg_path(env_key: &str, home_rel: &[&str], subpath: &[&str]) -> Option<PathBuf> {
+    let mut base = env::var(env_key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let home = env::var("HOME").ok()?;
+            let trimmed = home.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut p = PathBuf::from(trimmed);
+            p.extend(home_rel);
+            Some(p)
+        })?;
+    base.extend(subpath);
+    Some(base)
 }
 
 #[cfg(test)]
@@ -325,7 +328,10 @@ mod tests {
         let cfg = AppConfig::from_file("config.toml").expect("example config.toml should parse");
         assert_eq!(cfg.default_nickname.as_deref(), Some("irc_user"));
         let libera = &cfg.servers["libera"];
-        assert_eq!(libera.channels, vec!["#linux", "#rust"]);
+        assert_eq!(
+            libera.channels,
+            vec!["#linux", "#ltp", "#ai", "#c", "##rust", "#archlinux"]
+        );
     }
 
     #[test]
