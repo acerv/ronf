@@ -1752,6 +1752,87 @@ mod tests {
     }
 
     #[test]
+    fn dm_buffers_with_special_characters_round_trip_across_restart() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ronf_test_dm_roundtrip_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            log_dir = "{}"
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice[m]".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "hello from matrix".into()),
+            },
+        );
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("bob|afk".into(), "b".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "back later".into()),
+            },
+        );
+
+        let alice_idx = app.find_buffer("libera", "alice[m]").expect("alice[m] buffer found");
+        let bob_idx = app.find_buffer("libera", "bob|afk").expect("bob|afk buffer found");
+        assert_eq!(app.buffers[alice_idx].messages[0].content, "hello from matrix");
+        assert_eq!(app.buffers[bob_idx].messages[0].content, "back later");
+
+        let srv_dir = tmp_dir.join("libera");
+        assert!(srv_dir.join("alice%5Bm%5D.log").exists());
+        assert!(srv_dir.join("bob%7Cafk.log").exists());
+
+        let mut app2 = App::from_config(&cfg);
+        let restored_alice = app2
+            .find_buffer("libera", "alice[m]")
+            .expect("restored alice[m]");
+        let restored_bob = app2
+            .find_buffer("libera", "bob|afk")
+            .expect("restored bob|afk");
+        assert_eq!(
+            app2.buffers[restored_alice].messages[0].content,
+            "hello from matrix"
+        );
+        assert_eq!(
+            app2.buffers[restored_bob].messages[0].content,
+            "back later"
+        );
+
+        app2.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice[m]".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "second message".into()),
+            },
+        );
+        assert_eq!(app2.buffers[restored_alice].messages.len(), 2);
+        let count = app2
+            .buffers
+            .iter()
+            .filter(|b| b.server_id == "libera" && b.name.eq_ignore_ascii_case("alice[m]"))
+            .count();
+        assert_eq!(count, 1);
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
     fn clamps_help_scroll_to_viewport_height() {
         let mut app = test_app();
         app.set_terminal_height(40);
