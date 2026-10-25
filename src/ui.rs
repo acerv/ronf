@@ -35,17 +35,14 @@ pub fn nick_color(nick: &str) -> Color {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TreeRow {
+pub enum TreeRow<'a> {
     Server {
-        buffer_idx: usize,
-        name: String,
+        name: &'a str,
         active: bool,
         unread: bool,
     },
     Child {
-        buffer_idx: usize,
-        connector: &'static str,
-        name: String,
+        name: &'a str,
         active: bool,
         unread: bool,
         highlight: bool,
@@ -53,35 +50,26 @@ pub enum TreeRow {
     Separator,
 }
 
-pub fn build_tree_rows(app: &App) -> Vec<TreeRow> {
-    let mut rows = Vec::new();
-    let len = app.buffers.len();
+pub fn build_tree_rows(app: &App) -> Vec<TreeRow<'_>> {
+    let mut rows = Vec::with_capacity(app.buffers.len() + app.servers.len());
 
-    for i in 0..len {
-        let buf = &app.buffers[i];
+    for (i, buf) in app.buffers.iter().enumerate() {
         let active = i == app.active_buffer;
-        let unread = buf.unread;
-        let highlight = buf.highlight;
-
         if buf.kind == BufferKind::Server {
             if !rows.is_empty() {
                 rows.push(TreeRow::Separator);
             }
             rows.push(TreeRow::Server {
-                buffer_idx: i,
-                name: buf.name.clone(),
+                name: &buf.name,
                 active,
-                unread,
+                unread: buf.unread,
             });
         } else {
-            let connector = "  └ ";
             rows.push(TreeRow::Child {
-                buffer_idx: i,
-                connector,
-                name: buf.name.clone(),
+                name: &buf.name,
                 active,
-                unread,
-                highlight,
+                unread: buf.unread,
+                highlight: buf.highlight,
             });
         }
     }
@@ -134,7 +122,6 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 name,
                 active,
                 unread,
-                ..
             } => {
                 if active {
                     active_row_idx = idx;
@@ -157,17 +144,15 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 ))));
             }
             TreeRow::Child {
-                connector,
                 name,
                 active,
                 unread,
                 highlight,
-                ..
             } => {
                 if active {
                     active_row_idx = idx;
                 }
-                let prefix = if active { "> " } else { "  " };
+                let conn = if active { ">   └ " } else { "    └ " };
                 let conn_style = if active {
                     Style::default()
                         .fg(Color::Cyan)
@@ -191,7 +176,7 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     Style::default()
                 };
                 items.push(ListItem::new(Line::from(vec![
-                    Span::styled(format!("{prefix}{connector}"), conn_style),
+                    Span::styled(conn, conn_style),
                     Span::styled(name, name_style),
                 ])));
             }
@@ -761,38 +746,30 @@ mod tests {
             rows,
             vec![
                 TreeRow::Server {
-                    buffer_idx: 0,
-                    name: "libera".into(),
+                    name: "libera",
                     active: true,
                     unread: false,
                 },
                 TreeRow::Child {
-                    buffer_idx: 1,
-                    connector: "  └ ",
-                    name: "#linux".into(),
+                    name: "#linux",
                     active: false,
                     unread: false,
                     highlight: false,
                 },
                 TreeRow::Child {
-                    buffer_idx: 2,
-                    connector: "  └ ",
-                    name: "#rust".into(),
+                    name: "#rust",
                     active: false,
                     unread: false,
                     highlight: false,
                 },
                 TreeRow::Separator,
                 TreeRow::Server {
-                    buffer_idx: 3,
-                    name: "oftc".into(),
+                    name: "oftc",
                     active: false,
                     unread: false,
                 },
                 TreeRow::Child {
-                    buffer_idx: 4,
-                    connector: "  └ ",
-                    name: "#debian".into(),
+                    name: "#debian",
                     active: false,
                     unread: false,
                     highlight: false,
