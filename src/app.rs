@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use irc::client::Sender;
 use irc::proto::{ChannelMode, Command, Message, Mode, Prefix, Response};
 
-use crate::config::{AppConfig, DEFAULT_HISTORY_LIMIT};
+use crate::config::{AppConfig, DEFAULT_GENERIC_NICK, DEFAULT_HISTORY_LIMIT};
 
 pub const SLASH_COMMANDS: &[&str] = &[
     "/help",
@@ -628,7 +628,7 @@ impl App {
         for (server_id, srv) in config.enabled_servers() {
             let nick = srv
                 .effective_nickname(config.default_nickname.as_deref())
-                .unwrap_or_else(|_| "irc_user".to_string());
+                .unwrap_or_else(|_| DEFAULT_GENERIC_NICK.to_string());
             let limit = srv.effective_history_limit(config.history_limit);
             nicks.insert(server_id.clone(), nick);
             show_join_part.insert(
@@ -711,9 +711,15 @@ impl App {
         self.active_buf().server_id.clone()
     }
 
+    pub fn nick_for(&self, server_id: &str) -> &str {
+        self.nicks
+            .get(server_id)
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_GENERIC_NICK)
+    }
+
     pub fn active_nick(&self) -> &str {
-        let srv = &self.active_buf().server_id;
-        self.nicks.get(srv).map(String::as_str).unwrap_or("irc_user")
+        self.nick_for(&self.active_buf().server_id)
     }
 
     pub fn select_buffer(&mut self, index: usize) {
@@ -1698,11 +1704,7 @@ impl App {
         let is_ignored = sender_nick
             .as_deref()
             .is_some_and(|n| self.ignored_nicks.contains(&n.to_ascii_lowercase()));
-        let my_nick = self
-            .nicks
-            .get(server_id)
-            .cloned()
-            .unwrap_or_else(|| "irc_user".to_string());
+        let my_nick = self.nick_for(server_id).to_string();
 
         match msg.command {
             Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
@@ -2170,11 +2172,7 @@ impl App {
                 );
             }
             Response::ERR_NICKNAMEINUSE => {
-                let current = self
-                    .nicks
-                    .get(server_id)
-                    .cloned()
-                    .unwrap_or_else(|| "irc_user".to_string());
+                let current = self.nick_for(server_id).to_string();
                 let fallback = format!("{current}_");
                 self.nicks.insert(server_id.to_string(), fallback.clone());
                 if let Some(sender) = self.senders.get(server_id) {
