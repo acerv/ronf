@@ -83,6 +83,13 @@ impl Buffer {
         }
     }
 
+    /// Largest scroll offset that still fills the viewport with messages.
+    pub fn max_scroll(&self, viewport_rows: usize) -> usize {
+        self.messages
+            .len()
+            .saturating_sub(viewport_rows.max(1))
+    }
+
     pub fn mark_parted(&mut self) {
         self.parted = true;
         self.users.clear();

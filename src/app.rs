@@ -110,6 +110,12 @@ impl App {
         self.help_scroll = self.help_scroll.min(crate::ui::help_max_scroll(height));
     }
 
+    /// Number of rows available to the chat pane (input bar and separator
+    /// take the last two rows of the center column).
+    pub fn chat_viewport_height(&self) -> usize {
+        (self.term_height as usize).saturating_sub(2).max(1)
+    }
+
     pub fn history_limit_for(&self, server_id: &str) -> usize {
         self.servers
             .get(server_id)
@@ -485,16 +491,19 @@ impl App {
             KeyCode::Backspace => self.input.backspace(),
             KeyCode::Delete => self.input.delete_forward(),
             KeyCode::PageUp => {
+                let viewport = self.chat_viewport_height();
                 let server_id = self.active_server_id();
                 let limit = self.history_limit_for(&server_id);
                 let log_dir = self.log_dir.clone();
-                let buf = self.active_buf_mut();
-                if buf.scroll_offset.saturating_add(5) >= buf.messages.len().saturating_sub(1) {
+                let at_top = self.active_buf().scroll_offset.saturating_add(5)
+                    >= self.active_buf().max_scroll(viewport);
+                if at_top {
                     if let Some(ref dir) = log_dir {
-                        load_more_buffer_history(dir, buf, limit);
+                        load_more_buffer_history(dir, self.active_buf_mut(), limit);
                     }
                 }
-                let max_scroll = buf.messages.len().saturating_sub(1);
+                let max_scroll = self.active_buf().max_scroll(viewport);
+                let buf = self.active_buf_mut();
                 buf.scroll_offset = buf.scroll_offset.saturating_add(5).min(max_scroll);
             }
             KeyCode::PageDown => {
@@ -1457,6 +1466,7 @@ mod tests {
             },
         );
         app2.select_buffer(rust_idx);
+        app2.set_terminal_height(5);
         assert_eq!(
             app2.buffers[rust_idx]
                 .messages
@@ -1475,7 +1485,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["msg 2", "msg 3", "msg 4", "msg 5", "msg 6"]
         );
-        assert_eq!(app2.buffers[rust_idx].scroll_offset, 4);
+        assert_eq!(app2.buffers[rust_idx].scroll_offset, 2);
 
         app2.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(
@@ -1487,7 +1497,7 @@ mod tests {
             vec!["msg 1", "msg 2", "msg 3", "msg 4", "msg 5", "msg 6"]
         );
         assert_eq!(app2.buffers[rust_idx].history_cursor, Some(0));
-        assert_eq!(app2.buffers[rust_idx].scroll_offset, 5);
+        assert_eq!(app2.buffers[rust_idx].scroll_offset, 3);
 
         let zero_toml = format!(
             r##"
@@ -1506,6 +1516,57 @@ mod tests {
         let zero_rust = app_zero.find_buffer("libera", "#rust").unwrap();
         assert!(app_zero.buffers[zero_rust].messages.is_empty());
         assert!(app_zero.find_buffer("libera", "bob").is_none());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn pageup_at_end_of_history_keeps_viewport_filled() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "ronf_test_pageup_history_end_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            log_dir = "{}"
+            history_limit = 2
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+        app.set_terminal_height(5);
+
+        for i in 1..=4 {
+            app.handle_irc_message(
+                "libera",
+                Message {
+                    tags: None,
+                    prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                    command: Command::PRIVMSG("#rust".into(), format!("msg {i}")),
+                },
+            );
+        }
+
+        let viewport = app.chat_viewport_height();
+        for _ in 0..8 {
+            app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+            let buf = &app.buffers[rust_idx];
+            assert_eq!(buf.scroll_offset, buf.max_scroll(viewport));
+            assert!(buf.messages.len() - buf.scroll_offset >= viewport);
+        }
+        assert_eq!(app.buffers[rust_idx].messages.len(), 4);
+        assert_eq!(app.buffers[rust_idx].scroll_offset, 1);
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }

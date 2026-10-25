@@ -211,7 +211,8 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     let inner_height = padded.height as usize;
     let width = padded.width.max(1) as usize;
     let total_msgs = buf.messages.len();
-    let end = total_msgs.saturating_sub(buf.scroll_offset);
+    let scroll = buf.scroll_offset.min(buf.max_scroll(inner_height));
+    let end = total_msgs.saturating_sub(scroll);
 
     let mut acc_rows = 0usize;
     let mut visible_lines = Vec::with_capacity(inner_height.min(end));
