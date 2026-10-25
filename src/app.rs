@@ -2260,25 +2260,27 @@ fn next_char_boundary(s: &str, byte_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn server_log_dir(base_dir: &Path, server_id: &str) -> PathBuf {
-    let safe_srv: String = server_id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    base_dir.join(safe_srv)
-}
-
-fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
-    let safe_buf: String = buf_name
-        .chars()
+fn sanitize_log_component(raw: &str, allow_chan_prefix: bool) -> String {
+    raw.chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '#' | '&' | '-' | '_') {
+            if c.is_ascii_alphanumeric()
+                || matches!(c, '-' | '_')
+                || (allow_chan_prefix && matches!(c, '#' | '&'))
+            {
                 c
             } else {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+fn server_log_dir(base_dir: &Path, server_id: &str) -> PathBuf {
+    base_dir.join(sanitize_log_component(server_id, false))
+}
+
+fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
+    let safe_buf = sanitize_log_component(buf_name, true);
     server_log_dir(base_dir, server_id).join(format!("{safe_buf}.log"))
 }
 
@@ -2394,15 +2396,11 @@ fn discover_dm_buffers(
             let already_exists = existing.iter().any(|b| {
                 b.server_id.eq_ignore_ascii_case(server_id) && b.name.eq_ignore_ascii_case(&stem)
             });
-            if already_exists {
-                None
-            } else {
-                Some(stem)
-            }
+            (!already_exists).then_some(stem)
         })
         .collect();
 
-    dm_names.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    dm_names.sort_by_key(|a| a.to_ascii_lowercase());
 
     let mut dm_buffers = Vec::new();
     for name in dm_names {
