@@ -4,10 +4,12 @@ pub mod app;
 pub mod config;
 pub mod ui;
 
+use std::time::Duration;
+
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
-use irc::client::prelude::Client;
+use irc::client::prelude::{Client, Config as IrcConfig};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
@@ -34,81 +36,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Resul
         let server_id = server_id.clone();
         let irc_cfg = srv_cfg.to_irc_config(app_config.default_nickname.as_deref())?;
         let tx = tx.clone();
-
-        tokio::spawn(async move {
-            loop {
-                match Client::from_config(irc_cfg.clone()).await {
-                    Ok(mut client) => {
-                        if let Err(err) = client.identify() {
-                            let _ = tx.send(ServerEvent::Error {
-                                server_id: server_id.clone(),
-                                error: format!("Failed to identify: {err} (retrying in 5s)"),
-                            });
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            continue;
-                        }
-
-                        let sender = client.sender();
-                        if tx
-                            .send(ServerEvent::Connected {
-                                server_id: server_id.clone(),
-                                sender,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-
-                        let mut stream = match client.stream() {
-                            Ok(s) => s,
-                            Err(err) => {
-                                let _ = tx.send(ServerEvent::Error {
-                                    server_id: server_id.clone(),
-                                    error: format!("Failed to open IRC stream: {err} (retrying in 5s)"),
-                                });
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                continue;
-                            }
-                        };
-
-                        while let Some(item) = stream.next().await {
-                            match item {
-                                Ok(message) => {
-                                    if tx
-                                        .send(ServerEvent::Message {
-                                            server_id: server_id.clone(),
-                                            message: Box::new(message),
-                                        })
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                                Err(err) => {
-                                    let _ = tx.send(ServerEvent::Error {
-                                        server_id: server_id.clone(),
-                                        error: format!("Disconnected: {err} (reconnecting in 5s)"),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        if tx
-                            .send(ServerEvent::Error {
-                                server_id: server_id.clone(),
-                                error: format!("Connection failed: {err} (retrying in 5s)"),
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        });
+        tokio::spawn(run_server_loop(server_id, irc_cfg, tx));
     }
     drop(tx);
 
@@ -143,4 +71,89 @@ async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Resul
     }
 
     Ok(())
+}
+
+enum SessionEnd {
+    ReceiverClosed,
+    Retry(Option<String>),
+}
+
+async fn run_server_loop(
+    server_id: String,
+    irc_cfg: IrcConfig,
+    tx: mpsc::UnboundedSender<ServerEvent>,
+) {
+    loop {
+        match connect_and_stream(&server_id, irc_cfg.clone(), &tx).await {
+            SessionEnd::ReceiverClosed => break,
+            SessionEnd::Retry(Some(error)) => {
+                if tx
+                    .send(ServerEvent::Error {
+                        server_id: server_id.clone(),
+                        error,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            SessionEnd::Retry(None) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn connect_and_stream(
+    server_id: &str,
+    irc_cfg: IrcConfig,
+    tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> SessionEnd {
+    let mut client = match Client::from_config(irc_cfg).await {
+        Ok(c) => c,
+        Err(err) => return SessionEnd::Retry(Some(format!("Connection failed: {err} (retrying in 5s)"))),
+    };
+
+    if let Err(err) = client.identify() {
+        return SessionEnd::Retry(Some(format!("Failed to identify: {err} (retrying in 5s)")));
+    }
+
+    if tx
+        .send(ServerEvent::Connected {
+            server_id: server_id.to_string(),
+            sender: client.sender(),
+        })
+        .is_err()
+    {
+        return SessionEnd::ReceiverClosed;
+    }
+
+    let mut stream = match client.stream() {
+        Ok(s) => s,
+        Err(err) => {
+            return SessionEnd::Retry(Some(format!(
+                "Failed to open IRC stream: {err} (retrying in 5s)"
+            )));
+        }
+    };
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(message) => {
+                if tx
+                    .send(ServerEvent::Message {
+                        server_id: server_id.to_string(),
+                        message: Box::new(message),
+                    })
+                    .is_err()
+                {
+                    return SessionEnd::ReceiverClosed;
+                }
+            }
+            Err(err) => {
+                return SessionEnd::Retry(Some(format!("Disconnected: {err} (reconnecting in 5s)")));
+            }
+        }
+    }
+
+    SessionEnd::Retry(None)
 }
