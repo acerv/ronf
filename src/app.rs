@@ -1338,11 +1338,9 @@ impl App {
                     let _ = sender.send(Command::NICK(new_nick.clone()));
                 }
                 let old_nick = self.set_nick(&server_id, new_nick.clone());
-                for buf in &mut self.buffers {
-                    if buf.server_id.eq_ignore_ascii_case(&server_id) {
-                        buf.rename_user(&old_nick, &new_nick);
-                    }
-                }
+                self.affected_server_buffers(&server_id, |buf| {
+                    buf.rename_user(&old_nick, &new_nick)
+                });
                 self.push_system(self.active_buffer, format!("Nickname changed to {new_nick}"));
             }
             UserCommand::Me(action) => {
@@ -1613,30 +1611,64 @@ impl App {
         self.should_quit = true;
     }
 
+    fn affected_server_buffers(
+        &mut self,
+        server_id: &str,
+        mut f: impl FnMut(&mut Buffer) -> bool,
+    ) -> Vec<usize> {
+        self.buffers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, buf)| {
+                (buf.server_id.eq_ignore_ascii_case(server_id) && f(buf)).then_some(i)
+            })
+            .collect()
+    }
+
+    fn set_channel_topic(
+        &mut self,
+        server_id: &str,
+        chan: &str,
+        topic: Option<String>,
+        announce_empty: bool,
+    ) {
+        let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
+        self.buffers[idx].topic = topic.clone();
+        match topic {
+            Some(t) => self.push_system(idx, format!("* Topic for {chan}: {t}")),
+            None if announce_empty => {
+                self.push_system(idx, format!("* No topic is set for {chan}"))
+            }
+            None => {}
+        }
+    }
+
+    fn push_whois(&mut self, idx: usize, nick: &str, detail: impl std::fmt::Display) {
+        self.push_system(idx, format!("* [whois] {nick} {detail}"));
+    }
+
+    fn push_whois_tail(&mut self, idx: usize, args: &[String]) {
+        if args.len() >= 3 {
+            self.push_whois(idx, &args[1], args[2..].join(" "));
+        }
+    }
+
     pub fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::Connected { server_id, sender } => {
-                for buf in &mut self.buffers {
-                    if buf.server_id.eq_ignore_ascii_case(&server_id) {
-                        buf.pending_names.clear();
-                    }
-                }
+                self.affected_server_buffers(&server_id, |buf| {
+                    buf.pending_names.clear();
+                    false
+                });
                 self.set_sender(&server_id, Some(sender));
                 if let Some(idx) = self.find_server_buffer(&server_id) {
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("Connected to [{server_id}]"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_system(idx, format!("Connected to [{server_id}]"));
                 }
             }
             ServerEvent::Error { server_id, error } => {
                 self.set_sender(&server_id, None);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
-                    self.push_to_buffer(idx, ChatLine::new(None, error, LineKind::Error));
+                    self.push_error(idx, error);
                 }
             }
             ServerEvent::Message { server_id, message } => {
@@ -1669,13 +1701,12 @@ impl App {
                 let idx = self.ensure_buffer(server_id, &buf_name, buf_kind);
                 let is_from_self = sender_nick
                     .as_deref()
-                    .map(|s| s.eq_ignore_ascii_case(&my_nick))
-                    .unwrap_or(false);
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&my_nick));
 
-                let display_text = strip_ctcp_action(&text).unwrap_or(&text);
-                let is_mentioned = is_channel
-                    && !is_from_self
-                    && contains_nick_mention(display_text, &my_nick);
+                let ctcp_action = strip_ctcp_action(&text).map(str::to_string);
+                let display_text = ctcp_action.as_deref().unwrap_or(&text);
+                let is_mentioned =
+                    is_channel && !is_from_self && contains_nick_mention(display_text, &my_nick);
 
                 if !is_from_self && (is_new_dm || !is_channel || is_mentioned) {
                     if idx != self.active_buffer {
@@ -1700,14 +1731,11 @@ impl App {
                     }
                 }
 
-                if let Some(action) = strip_ctcp_action(&text) {
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(sender_nick, action.to_string(), LineKind::Action),
-                    );
-                } else {
-                    self.push_to_buffer(idx, ChatLine::new(sender_nick, text, LineKind::Normal));
-                }
+                let (content, kind) = match ctcp_action {
+                    Some(action) => (action, LineKind::Action),
+                    None => (text, LineKind::Normal),
+                };
+                self.push_to_buffer(idx, ChatLine::new(sender_nick, content, kind));
             }
             Command::NOTICE(target, text) => {
                 let idx = if is_channel_name(&target) {
@@ -1715,10 +1743,8 @@ impl App {
                 } else {
                     self.find_server_buffer(server_id).unwrap_or(0)
                 };
-                let prefix = sender_nick
-                    .map(|n| format!("-{n}- {text}"))
-                    .unwrap_or(text);
-                self.push_to_buffer(idx, ChatLine::new(None, prefix, LineKind::System));
+                let prefix = sender_nick.map(|n| format!("-{n}- {text}")).unwrap_or(text);
+                self.push_system(idx, prefix);
             }
             Command::JOIN(chan, _, _) => {
                 let idx = self.ensure_buffer(server_id, &chan, BufferKind::Channel);
@@ -1728,14 +1754,7 @@ impl App {
                     }
                     self.buffers[idx].add_user(&nick);
                     if self.should_show_join_part(server_id) {
-                        self.push_to_buffer(
-                            idx,
-                            ChatLine::new(
-                                None,
-                                format!("--> {nick} has joined {chan}"),
-                                LineKind::System,
-                            ),
-                        );
+                        self.push_system(idx, format!("--> {nick} has joined {chan}"));
                     }
                 }
             }
@@ -1744,15 +1763,8 @@ impl App {
                     if let Some(nick) = sender_nick {
                         self.buffers[idx].remove_user(&nick);
                         if self.should_show_join_part(server_id) {
-                            let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-                            self.push_to_buffer(
-                                idx,
-                                ChatLine::new(
-                                    None,
-                                    format!("<-- {nick} has left {chan}{suffix}"),
-                                    LineKind::System,
-                                ),
-                            );
+                            let suffix = format_reason(reason);
+                            self.push_system(idx, format!("<-- {nick} has left {chan}{suffix}"));
                         }
                     }
                 }
@@ -1761,45 +1773,22 @@ impl App {
                 if let Some(idx) = self.find_buffer(server_id, &chan) {
                     self.buffers[idx].remove_user(&kicked);
                     let by = sender_nick.unwrap_or_else(|| "server".to_string());
-                    let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-                    self.push_to_buffer(
+                    let suffix = format_reason(reason);
+                    self.push_system(
                         idx,
-                        ChatLine::new(
-                            None,
-                            format!("<-- {kicked} was kicked from {chan} by {by}{suffix}"),
-                            LineKind::System,
-                        ),
+                        format!("<-- {kicked} was kicked from {chan} by {by}{suffix}"),
                     );
                 }
             }
             Command::QUIT(reason) => {
                 if let Some(nick) = sender_nick {
                     let should_show = self.should_show_join_part(server_id);
-                    let suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-                    let affected: Vec<usize> = self
-                        .buffers
-                        .iter_mut()
-                        .enumerate()
-                        .filter_map(|(i, buf)| {
-                            if buf.server_id.eq_ignore_ascii_case(server_id)
-                                && buf.remove_user(&nick)
-                            {
-                                Some(i)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
+                    let suffix = format_reason(reason);
+                    let affected =
+                        self.affected_server_buffers(server_id, |buf| buf.remove_user(&nick));
                     if should_show {
                         for idx in affected {
-                            self.push_to_buffer(
-                                idx,
-                                ChatLine::new(
-                                    None,
-                                    format!("<-- {nick} has quit{suffix}"),
-                                    LineKind::System,
-                                ),
-                            );
+                            self.push_system(idx, format!("<-- {nick} has quit{suffix}"));
                         }
                     }
                 }
@@ -1809,70 +1798,30 @@ impl App {
                     if old_nick.eq_ignore_ascii_case(&my_nick) {
                         self.set_nick(server_id, new_nick.clone());
                     }
-                    let affected: Vec<usize> = self
-                        .buffers
-                        .iter_mut()
-                        .enumerate()
-                        .filter_map(|(i, buf)| {
-                            if buf.server_id.eq_ignore_ascii_case(server_id)
-                                && buf.rename_user(&old_nick, &new_nick)
-                            {
-                                Some(i)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
+                    let affected = self.affected_server_buffers(server_id, |buf| {
+                        buf.rename_user(&old_nick, &new_nick)
+                    });
                     for idx in affected {
-                        self.push_to_buffer(
-                            idx,
-                            ChatLine::new(
-                                None,
-                                format!("* {old_nick} is now known as {new_nick}"),
-                                LineKind::System,
-                            ),
-                        );
+                        self.push_system(idx, format!("* {old_nick} is now known as {new_nick}"));
                     }
                 }
             }
             Command::TOPIC(chan, topic) => {
-                let idx = self.ensure_buffer(server_id, &chan, BufferKind::Channel);
-                self.buffers[idx].topic = topic.clone();
-                if let Some(t) = topic {
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("* Topic for {chan}: {t}"),
-                            LineKind::System,
-                        ),
-                    );
-                }
+                self.set_channel_topic(server_id, &chan, topic, false);
             }
             Command::INVITE(invited, chan) => {
                 let by = sender_nick.unwrap_or_else(|| "someone".to_string());
                 let idx = self.target_buffer_for_server(server_id);
-                self.push_to_buffer(
-                    idx,
-                    ChatLine::new(
-                        None,
-                        format!("* {by} invited {invited} to {chan}"),
-                        LineKind::System,
-                    ),
-                );
+                self.push_system(idx, format!("* {by} invited {invited} to {chan}"));
             }
             Command::ChannelMODE(chan, modes) => {
                 if let Some(idx) = self.find_buffer(server_id, &chan) {
                     self.buffers[idx].apply_channel_modes(&modes);
                     let by = sender_nick.unwrap_or_else(|| "server".to_string());
                     let mode_strs: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
-                    self.push_to_buffer(
+                    self.push_system(
                         idx,
-                        ChatLine::new(
-                            None,
-                            format!("* {by} sets mode {} on {chan}", mode_strs.join(" ")),
-                            LineKind::System,
-                        ),
+                        format!("* {by} sets mode {} on {chan}", mode_strs.join(" ")),
                     );
                 }
             }
@@ -1890,35 +1839,11 @@ impl App {
         let idx = self.target_buffer_for_server(server_id);
         match code {
             "330" => {
-                // RPL_WHOISACCOUNT: [<me>, <nick>, <account>, "is logged in as"]
                 if args.len() >= 3 {
-                    let nick = &args[1];
-                    let account = &args[2];
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} is logged in as {account}"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_whois(idx, &args[1], format!("is logged in as {}", args[2]));
                 }
             }
-            "378" | "671" => {
-                // RPL_WHOISHOST (378) / RPL_WHOISSECURE (671): [<me>, <nick>, <info...>]
-                if args.len() >= 3 {
-                    let nick = &args[1];
-                    let info = args[2..].join(" ");
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} {info}"),
-                            LineKind::System,
-                        ),
-                    );
-                }
-            }
+            "378" | "671" => self.push_whois_tail(idx, &args),
             _ => {}
         }
     }
@@ -1928,53 +1853,25 @@ impl App {
         match resp {
             Response::RPL_NOTOPIC => {
                 if args.len() >= 2 {
-                    let chan = &args[1];
-                    let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
-                    self.buffers[idx].topic = None;
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("* No topic is set for {chan}"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.set_channel_topic(server_id, &args[1], None, true);
                 }
             }
             Response::RPL_TOPIC => {
                 if args.len() >= 3 {
-                    let chan = &args[1];
-                    let topic = args[2..].join(" ");
-                    let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
-                    self.buffers[idx].topic = Some(topic.clone());
-                    self.push_to_buffer(
-                        idx,
-                        ChatLine::new(
-                            None,
-                            format!("* Topic for {chan}: {topic}"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.set_channel_topic(server_id, &args[1], Some(args[2..].join(" ")), false);
                 }
             }
             Response::RPL_NAMREPLY => {
-                // Format: [<me>, "="|"*"|"@", <channel>, "<space-separated names>"]
                 if args.len() >= 4 {
-                    let chan = &args[2];
-                    let names_str = &args[3];
-                    let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
-                    for name in names_str.split_whitespace() {
-                        if !name.is_empty() {
-                            self.buffers[idx].pending_names.push(name.to_string());
-                        }
-                    }
+                    let idx = self.ensure_buffer(server_id, &args[2], BufferKind::Channel);
+                    self.buffers[idx]
+                        .pending_names
+                        .extend(args[3].split_whitespace().map(str::to_string));
                 }
             }
             Response::RPL_ENDOFNAMES => {
-                // Format: [<me>, <channel>, "End of /NAMES list."]
                 if args.len() >= 2 {
-                    let chan = &args[1];
-                    if let Some(idx) = self.find_buffer(server_id, chan) {
+                    if let Some(idx) = self.find_buffer(server_id, &args[1]) {
                         let pending = std::mem::take(&mut self.buffers[idx].pending_names);
                         self.buffers[idx].users = pending;
                         self.buffers[idx].sort_users();
@@ -1983,125 +1880,50 @@ impl App {
             }
             Response::RPL_WHOISUSER => {
                 if args.len() >= 6 {
-                    let nick = &args[1];
-                    let user = &args[2];
-                    let host = &args[3];
                     let real = args[5..].join(" ");
-                    self.push_to_buffer(
-                        srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} ({user}@{host}): {real}"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_whois(srv_target, &args[1], format!("({}@{}): {real}", args[2], args[3]));
                 }
             }
             Response::RPL_WHOISSERVER => {
                 if args.len() >= 4 {
-                    let nick = &args[1];
-                    let srv = &args[2];
                     let info = args[3..].join(" ");
-                    self.push_to_buffer(
-                        srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} server: {srv} ({info})"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_whois(srv_target, &args[1], format!("server: {} ({info})", args[2]));
                 }
             }
-            Response::RPL_WHOISOPERATOR => {
-                if args.len() >= 3 {
-                    let nick = &args[1];
-                    let info = args[2..].join(" ");
-                    self.push_to_buffer(
-                        srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} {info}"),
-                            LineKind::System,
-                        ),
-                    );
-                }
-            }
+            Response::RPL_WHOISOPERATOR => self.push_whois_tail(srv_target, &args),
             Response::RPL_WHOISIDLE => {
                 if args.len() >= 3 {
-                    let nick = &args[1];
-                    let secs = &args[2];
-                    self.push_to_buffer(
-                        srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} idle: {secs}s"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_whois(srv_target, &args[1], format!("idle: {}s", args[2]));
                 }
             }
             Response::RPL_WHOISCHANNELS => {
                 if args.len() >= 3 {
-                    let nick = &args[1];
-                    let chans = args[2..].join(" ");
-                    self.push_to_buffer(
-                        srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} channels: {chans}"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_whois(srv_target, &args[1], format!("channels: {}", args[2..].join(" ")));
                 }
             }
             Response::RPL_ENDOFWHOIS => {
                 if args.len() >= 2 {
-                    let nick = &args[1];
-                    self.push_to_buffer(
-                        srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [whois] {nick} End of WHOIS"),
-                            LineKind::System,
-                        ),
-                    );
+                    self.push_whois(srv_target, &args[1], "End of WHOIS");
                 }
             }
             Response::RPL_UNAWAY | Response::RPL_NOWAWAY => {
-                let text = if args.len() > 1 {
-                    args[1..].join(" ")
-                } else {
-                    args.join(" ")
-                };
-                self.push_to_buffer(
-                    srv_target,
-                    ChatLine::new(None, format!("* {text}"), LineKind::System),
-                );
+                self.push_system(srv_target, format!("* {}", trailing_text(&args)));
             }
             Response::RPL_LIST => {
                 if args.len() >= 3 {
-                    let chan = &args[1];
-                    let count = &args[2];
                     let topic = if args.len() >= 4 {
                         args[3..].join(" ")
                     } else {
                         String::new()
                     };
-                    self.push_to_buffer(
+                    self.push_system(
                         srv_target,
-                        ChatLine::new(
-                            None,
-                            format!("* [list] {chan} ({count}): {topic}"),
-                            LineKind::System,
-                        ),
+                        format!("* [list] {} ({}): {topic}", args[1], args[2]),
                     );
                 }
             }
             Response::RPL_LISTEND => {
-                self.push_to_buffer(
-                    srv_target,
-                    ChatLine::new(None, "* [list] End of /LIST", LineKind::System),
-                );
+                self.push_system(srv_target, "* [list] End of /LIST");
             }
             Response::ERR_NICKNAMEINUSE => {
                 let current = self.nick_for(server_id).to_string();
@@ -2111,13 +1933,9 @@ impl App {
                     let _ = sender.send(Command::NICK(fallback.clone()));
                 }
                 let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
-                self.push_to_buffer(
+                self.push_error(
                     idx,
-                    ChatLine::new(
-                        None,
-                        format!("! Nickname '{current}' in use; switching to '{fallback}'"),
-                        LineKind::Error,
-                    ),
+                    format!("! Nickname '{current}' in use; switching to '{fallback}'"),
                 );
             }
             Response::RPL_WELCOME
@@ -2128,31 +1946,30 @@ impl App {
             | Response::RPL_ENDOFMOTD
             | Response::ERR_NOMOTD => {
                 if let Some(srv_idx) = self.find_server_buffer(server_id) {
-                    let text = if args.len() > 1 {
-                        args[1..].join(" ")
-                    } else {
-                        args.join(" ")
-                    };
-                    self.push_to_buffer(srv_idx, ChatLine::new(None, text, LineKind::System));
+                    self.push_system(srv_idx, trailing_text(&args));
                 }
                 if matches!(resp, Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD) {
                     self.join_server_channels(server_id);
                 }
             }
             _ if resp.is_error() => {
-                let text = if args.len() > 1 {
-                    args[1..].join(" ")
-                } else {
-                    args.join(" ")
-                };
-                self.push_to_buffer(
-                    srv_target,
-                    ChatLine::new(None, format!("! {text}"), LineKind::Error),
-                );
+                self.push_error(srv_target, format!("! {}", trailing_text(&args)));
             }
             _ => {}
         }
     }
+}
+
+fn trailing_text(args: &[String]) -> String {
+    if args.len() > 1 {
+        args[1..].join(" ")
+    } else {
+        args.join(" ")
+    }
+}
+
+fn format_reason(reason: Option<String>) -> String {
+    reason.map(|r| format!(" ({r})")).unwrap_or_default()
 }
 
 fn extract_nick(prefix: &Option<Prefix>) -> Option<String> {
