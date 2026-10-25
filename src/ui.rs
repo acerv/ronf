@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::sync::OnceLock;
+
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -539,14 +541,23 @@ pub fn build_help_lines() -> (Vec<Line<'static>>, u16) {
     (lines, max_w as u16)
 }
 
+fn cached_help() -> &'static (Vec<Line<'static>>, u16) {
+    static HELP: OnceLock<(Vec<Line<'static>>, u16)> = OnceLock::new();
+    HELP.get_or_init(build_help_lines)
+}
+
+pub fn help_line_count() -> usize {
+    cached_help().0.len()
+}
+
 fn draw_help_popup(f: &mut Frame, app: &App) {
     let area = f.area();
-    let (lines, content_width) = build_help_lines();
+    let (lines, content_width) = cached_help();
     let total_lines = lines.len() as u16;
 
     let title = " Help — q/Esc to close, j/k to scroll ";
     let title_len = title.chars().count() as u16;
-    let popup_w = (content_width + 4).max(title_len + 2).min(area.width);
+    let popup_w = (*content_width + 4).max(title_len + 2).min(area.width);
     let popup_h = (total_lines + 2).min(area.height.saturating_sub(2).max(6));
 
     let x = area.width.saturating_sub(popup_w) / 2;
@@ -572,7 +583,7 @@ fn draw_help_popup(f: &mut Frame, app: &App) {
     let max_scroll = lines.len().saturating_sub(padded.height as usize);
     let scroll = app.help_scroll.min(max_scroll) as u16;
 
-    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+    let paragraph = Paragraph::new(lines.clone()).scroll((scroll, 0));
     f.render_widget(paragraph, padded);
 }
 

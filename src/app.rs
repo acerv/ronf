@@ -1209,17 +1209,14 @@ impl App {
     }
 
     fn handle_help_key_event(&mut self, key: KeyEvent) {
+        let max_scroll = crate::ui::help_line_count().saturating_sub(1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl {
             match key.code {
-                KeyCode::Char('c') | KeyCode::Char('q') => {
-                    self.quit_all(None);
-                }
-                KeyCode::Char('u') => {
-                    self.help_scroll = self.help_scroll.saturating_sub(8);
-                }
+                KeyCode::Char('c') | KeyCode::Char('q') => self.quit_all(None),
+                KeyCode::Char('u') => self.help_scroll = self.help_scroll.saturating_sub(8),
                 KeyCode::Char('d') => {
-                    self.help_scroll = self.help_scroll.saturating_add(8);
+                    self.help_scroll = self.help_scroll.saturating_add(8).min(max_scroll);
                 }
                 _ => {}
             }
@@ -1227,27 +1224,19 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-                self.show_help = false;
-            }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.show_help = false,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.help_scroll = self.help_scroll.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.help_scroll = self.help_scroll.saturating_add(1);
+                self.help_scroll = self.help_scroll.saturating_add(1).min(max_scroll);
             }
-            KeyCode::PageUp => {
-                self.help_scroll = self.help_scroll.saturating_sub(8);
-            }
+            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(8),
             KeyCode::PageDown | KeyCode::Char(' ') => {
-                self.help_scroll = self.help_scroll.saturating_add(8);
+                self.help_scroll = self.help_scroll.saturating_add(8).min(max_scroll);
             }
-            KeyCode::Home | KeyCode::Char('g') => {
-                self.help_scroll = 0;
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                self.help_scroll = 1000;
-            }
+            KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => self.help_scroll = max_scroll,
             _ => {}
         }
     }
