@@ -906,8 +906,8 @@ impl App {
 
     pub fn quit_all(&mut self, reason: Option<String>) {
         let quit_msg = reason.or_else(|| Some("ronf shutting down".to_string()));
-        for srv in self.servers.values() {
-            if let Some(sender) = &srv.sender {
+        for srv in self.servers.values_mut() {
+            if let Some(sender) = srv.sender.take() {
                 let _ = sender.send(Command::QUIT(quit_msg.clone()));
             }
         }
