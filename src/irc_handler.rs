@@ -149,10 +149,27 @@ impl App {
         match msg.command {
             Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
             Command::PRIVMSG(target, text) => {
+                let is_channel = is_channel_name(&target);
+                let ctcp_action = match parse_ctcp(&text) {
+                    Some(CtcpPayload::Action(act)) => Some(act.to_string()),
+                    Some(CtcpPayload::Other(ctcp)) => {
+                        let idx = if is_channel {
+                            self.find_buffer(server_id, &target)
+                                .unwrap_or_else(|| self.target_buffer_for_server(server_id))
+                        } else {
+                            self.find_server_buffer(server_id)
+                                .unwrap_or(self.active_buffer)
+                        };
+                        let from = sender_nick.as_deref().unwrap_or("someone");
+                        self.push_system(idx, format!("* [ctcp] {from}: {ctcp}"));
+                        return;
+                    }
+                    None => None,
+                };
+
                 let is_from_self = sender_nick
                     .as_deref()
                     .is_some_and(|s| s.eq_ignore_ascii_case(&my_nick));
-                let is_channel = is_channel_name(&target);
                 let (buf_name, buf_kind) = if is_channel {
                     (target, BufferKind::Channel)
                 } else if is_from_self {
@@ -167,7 +184,6 @@ impl App {
                 let is_new_dm = !is_channel && self.find_buffer(server_id, &buf_name).is_none();
                 let idx = self.ensure_buffer(server_id, &buf_name, buf_kind);
 
-                let ctcp_action = strip_ctcp_action(&text).map(str::to_string);
                 let display_text = ctcp_action.as_deref().unwrap_or(&text);
                 let is_mentioned =
                     is_channel && !is_from_self && contains_nick_mention(display_text, &my_nick);
@@ -202,6 +218,14 @@ impl App {
                 self.push_to_buffer(idx, ChatLine::new(sender_nick, content, kind));
             }
             Command::NOTICE(target, text) => {
+                if let Some(CtcpPayload::Other(ctcp) | CtcpPayload::Action(ctcp)) =
+                    parse_ctcp(&text)
+                {
+                    let idx = self.target_buffer_for_server(server_id);
+                    let from = sender_nick.as_deref().unwrap_or("someone");
+                    self.push_system(idx, format!("* [ctcp] {from} reply: {ctcp}"));
+                    return;
+                }
                 let idx = if is_channel_name(&target) {
                     self.ensure_buffer(server_id, &target, BufferKind::Channel)
                 } else {
@@ -477,9 +501,24 @@ fn extract_nick(prefix: &Option<Prefix>) -> Option<String> {
     }
 }
 
-fn strip_ctcp_action(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("\x01ACTION ")?;
-    Some(rest.strip_suffix('\x01').unwrap_or(rest))
+enum CtcpPayload<'a> {
+    Action(&'a str),
+    Other(&'a str),
+}
+
+fn parse_ctcp(text: &str) -> Option<CtcpPayload<'_>> {
+    let inner = text.strip_prefix('\x01')?;
+    let inner = inner.strip_suffix('\x01').unwrap_or(inner);
+    if inner.eq_ignore_ascii_case("ACTION") {
+        Some(CtcpPayload::Action(""))
+    } else if inner
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("ACTION "))
+    {
+        Some(CtcpPayload::Action(&inner[7..]))
+    } else {
+        Some(CtcpPayload::Other(inner))
+    }
 }
 
 #[cfg(not(test))]

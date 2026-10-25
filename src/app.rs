@@ -1707,4 +1707,38 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.help_scroll, expected_max - 1);
     }
+
+    #[test]
+    fn handles_non_action_ctcp_and_bare_action_cleanly() {
+        let mut app = test_app();
+        let srv_idx = app.find_server_buffer("libera").unwrap();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("scanner".into(), "s".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "\x01VERSION\x01".into()),
+            },
+        );
+        assert!(app.find_buffer("libera", "scanner").is_none());
+        assert!(app.buffers[srv_idx]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("[ctcp] scanner: VERSION"));
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "\x01ACTION\x01".into()),
+            },
+        );
+        assert_eq!(app.buffers[rust_idx].messages[0].kind, LineKind::Action);
+        assert_eq!(app.buffers[rust_idx].messages[0].content, "");
+    }
 }
