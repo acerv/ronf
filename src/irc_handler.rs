@@ -173,7 +173,11 @@ impl App {
             Command::PART(chan, reason) => {
                 if let Some(idx) = self.find_buffer(server_id, &chan) {
                     if let Some(nick) = sender_nick {
-                        self.buffers[idx].remove_user(&nick);
+                        if nick.eq_ignore_ascii_case(&my_nick) {
+                            self.buffers[idx].mark_parted();
+                        } else {
+                            self.buffers[idx].remove_user(&nick);
+                        }
                         if self.should_show_join_part(server_id) {
                             let suffix = format_reason(reason);
                             self.push_system(idx, format!("<-- {nick} has left {chan}{suffix}"));
@@ -183,7 +187,11 @@ impl App {
             }
             Command::KICK(chan, kicked, reason) => {
                 if let Some(idx) = self.find_buffer(server_id, &chan) {
-                    self.buffers[idx].remove_user(&kicked);
+                    if kicked.eq_ignore_ascii_case(&my_nick) {
+                        self.buffers[idx].mark_parted();
+                    } else {
+                        self.buffers[idx].remove_user(&kicked);
+                    }
                     let by = sender_nick.unwrap_or_else(|| "server".to_string());
                     let suffix = format_reason(reason);
                     self.push_system(

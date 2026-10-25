@@ -80,6 +80,12 @@ impl Buffer {
         }
     }
 
+    pub fn mark_parted(&mut self) {
+        self.parted = true;
+        self.users.clear();
+        self.pending_names.clear();
+    }
+
     pub fn sort_users(&mut self) {
         for user in &mut self.users {
             let (prefixes, raw) = extract_user_prefixes(user);

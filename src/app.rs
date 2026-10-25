@@ -565,10 +565,7 @@ impl App {
                 if !self.send_irc(&server_id, Command::PART(chan.clone(), reason)) {
                     return;
                 }
-                let buf = self.active_buf_mut();
-                buf.parted = true;
-                buf.users.clear();
-                buf.pending_names.clear();
+                self.active_buf_mut().mark_parted();
                 self.push_system(self.active_buffer, format!("Left {chan}"));
             }
             UserCommand::Msg { target, text } => {
@@ -1494,5 +1491,36 @@ mod tests {
 
         app.execute_user_command(UserCommand::Nick("new_nick".into()));
         assert_eq!(app.nick_for("libera"), "irc_user");
+    }
+
+    #[test]
+    fn marks_channel_parted_and_clears_users_on_own_part_or_kick() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        let linux_idx = app.find_buffer("libera", "#linux").unwrap();
+
+        app.buffers[rust_idx].users = vec!["alice".into(), "irc_user".into()];
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("irc_user".into(), "u".into(), "h".into())),
+                command: Command::PART("#rust".into(), None),
+            },
+        );
+        assert!(app.buffers[rust_idx].parted);
+        assert!(app.buffers[rust_idx].users.is_empty());
+
+        app.buffers[linux_idx].users = vec!["@op".into(), "irc_user".into()];
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("op".into(), "o".into(), "h".into())),
+                command: Command::KICK("#linux".into(), "irc_user".into(), None),
+            },
+        );
+        assert!(app.buffers[linux_idx].parted);
+        assert!(app.buffers[linux_idx].users.is_empty());
     }
 }
