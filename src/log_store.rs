@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,45 @@ fn server_log_dir(base_dir: &Path, server_id: &str) -> PathBuf {
 fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
     let safe_buf = sanitize_log_component(buf_name, true);
     server_log_dir(base_dir, server_id).join(format!("{safe_buf}.log"))
+}
+
+fn closed_dms_path(base_dir: &Path, server_id: &str) -> PathBuf {
+    server_log_dir(base_dir, server_id).join(".closed_dms")
+}
+
+fn read_closed_dms(base_dir: &Path, server_id: &str) -> BTreeSet<String> {
+    fs::read_to_string(closed_dms_path(base_dir, server_id))
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_dm_closed(base_dir: &Path, server_id: &str, dm_name: &str, closed: bool) {
+    let key = sanitize_log_component(dm_name, true).to_ascii_lowercase();
+    let mut set = read_closed_dms(base_dir, server_id);
+    let changed = if closed {
+        set.insert(key)
+    } else {
+        set.remove(&key)
+    };
+    if !changed {
+        return;
+    }
+    let path = closed_dms_path(base_dir, server_id);
+    if set.is_empty() {
+        let _ = fs::remove_file(path);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let body: String = set.into_iter().map(|s| format!("{s}\n")).collect();
+    let _ = fs::write(path, body);
 }
 
 pub(crate) fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
@@ -127,6 +167,7 @@ pub(crate) fn discover_dm_buffers(
     let Ok(entries) = fs::read_dir(srv_dir) else {
         return Vec::new();
     };
+    let closed_dms = read_closed_dms(base_dir, server_id);
 
     let mut dm_names: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -136,7 +177,10 @@ pub(crate) fn discover_dm_buffers(
                 return None;
             }
             let stem = path.file_stem()?.to_str()?.to_string();
-            if stem.is_empty() || is_channel_name(&stem) {
+            if stem.is_empty()
+                || is_channel_name(&stem)
+                || closed_dms.contains(&stem.to_ascii_lowercase())
+            {
                 return None;
             }
             let already_exists = existing.iter().any(|b| {

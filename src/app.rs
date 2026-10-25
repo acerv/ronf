@@ -11,7 +11,9 @@ use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
 use crate::command::{parse_user_command, UserCommand};
 use crate::config::{AppConfig, DEFAULT_GENERIC_NICK, DEFAULT_HISTORY_LIMIT};
 use crate::input::InputState;
-use crate::log_store::{append_buffer_log, discover_dm_buffers, load_more_buffer_history};
+use crate::log_store::{
+    append_buffer_log, discover_dm_buffers, load_more_buffer_history, set_dm_closed,
+};
 
 #[derive(Debug, Clone)]
 pub struct ServerState {
@@ -277,6 +279,9 @@ impl App {
         let mut buf = Buffer::new(server_id.to_string(), name.to_string(), kind);
         let limit = self.history_limit_for(server_id);
         if let Some(ref dir) = self.log_dir {
+            if kind == BufferKind::DirectMessage {
+                set_dm_closed(dir, server_id, name, false);
+            }
             load_more_buffer_history(dir, &mut buf, limit);
         }
         self.buffers.insert(insert_pos, buf);
@@ -848,6 +853,11 @@ impl App {
                     let chan = self.active_buf().name.clone();
                     if let Some(sender) = self.sender_for(&server_id) {
                         let _ = sender.send(Command::PART(chan, None));
+                    }
+                } else if self.active_buf().kind == BufferKind::DirectMessage {
+                    if let Some(ref dir) = self.log_dir {
+                        let dm_name = self.active_buf().name.clone();
+                        set_dm_closed(dir, &server_id, &dm_name, true);
                     }
                 }
                 self.buffers.remove(self.active_buffer);
@@ -1627,5 +1637,53 @@ mod tests {
         assert_ne!(dm_idx, srv_idx);
         assert_eq!(app.buffers[dm_idx].kind, BufferKind::DirectMessage);
         assert_eq!(app.buffers[dm_idx].messages[0].content, "hello");
+    }
+
+    #[test]
+    fn closed_dm_buffer_stays_closed_across_restart_until_reopened() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ronf_test_closed_dm_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            log_dir = "{}"
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("bob".into(), "b".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "hi".into()),
+            },
+        );
+        let bob_idx = app.find_buffer("libera", "bob").unwrap();
+        app.select_buffer(bob_idx);
+        app.execute_user_command(UserCommand::Close);
+
+        let mut app2 = App::from_config(&cfg);
+        assert!(app2.find_buffer("libera", "bob").is_none());
+
+        app2.execute_user_command(UserCommand::Query {
+            target: "bob".into(),
+            text: None,
+        });
+        let reopened = app2.find_buffer("libera", "bob").unwrap();
+        assert_eq!(app2.buffers[reopened].messages.len(), 1);
+
+        let app3 = App::from_config(&cfg);
+        assert!(app3.find_buffer("libera", "bob").is_some());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }
