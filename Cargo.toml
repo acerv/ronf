@@ -16,5 +16,5 @@ irc = "1.0.0"
 notify-rust = "4"
 ratatui = "0.29"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
