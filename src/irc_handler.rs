@@ -16,6 +16,10 @@ pub enum ServerEvent {
         server_id: String,
         message: Box<Message>,
     },
+    NickRejected {
+        server_id: String,
+        registered: bool,
+    },
     Error {
         server_id: String,
         error: String,
@@ -97,7 +101,42 @@ impl App {
             ServerEvent::Message { server_id, message } => {
                 self.handle_irc_message(&server_id, *message);
             }
+            ServerEvent::NickRejected {
+                server_id,
+                registered,
+            } => {
+                self.handle_nick_rejected(&server_id, registered);
+            }
         }
+    }
+
+    pub fn handle_nick_rejected(&mut self, server_id: &str, registered: bool) {
+        if registered {
+            let idx = self.target_buffer_for_server(server_id);
+            self.push_error(idx, "! Nickname is already in use or invalid");
+            return;
+        }
+
+        let current = self.nick_for(server_id).to_string();
+        let trailing_underscores = current.bytes().rev().take_while(|&b| b == b'_').count();
+        let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
+        if trailing_underscores >= 5 || current.len() >= 30 {
+            self.push_error(
+                idx,
+                format!("! Nickname '{current}' rejected; use /nick to choose another"),
+            );
+            return;
+        }
+
+        let fallback = format!("{current}_");
+        self.set_nick(server_id, fallback.clone());
+        if let Some(sender) = self.sender_for(server_id) {
+            let _ = sender.send(Command::NICK(fallback.clone()));
+        }
+        self.push_error(
+            idx,
+            format!("! Nickname '{current}' in use; switching to '{fallback}'"),
+        );
     }
 
     pub fn handle_irc_message(&mut self, server_id: &str, msg: Message) {
@@ -386,17 +425,8 @@ impl App {
                 self.push_system(srv_target, "* [list] End of /LIST");
             }
             Response::ERR_NICKNAMEINUSE => {
-                let current = self.nick_for(server_id).to_string();
-                let fallback = format!("{current}_");
-                self.set_nick(server_id, fallback.clone());
-                if let Some(sender) = self.sender_for(server_id) {
-                    let _ = sender.send(Command::NICK(fallback.clone()));
-                }
-                let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
-                self.push_error(
-                    idx,
-                    format!("! Nickname '{current}' in use; switching to '{fallback}'"),
-                );
+                let registered = args.first().is_some_and(|a| a != "*");
+                self.handle_nick_rejected(server_id, registered);
             }
             Response::RPL_WELCOME
             | Response::RPL_YOURHOST
@@ -405,6 +435,13 @@ impl App {
             | Response::RPL_MOTD
             | Response::RPL_ENDOFMOTD
             | Response::ERR_NOMOTD => {
+                if resp == Response::RPL_WELCOME {
+                    if let Some(welcome_nick) =
+                        args.first().filter(|n| !n.is_empty() && *n != "*")
+                    {
+                        self.set_nick(server_id, welcome_nick.clone());
+                    }
+                }
                 if let Some(srv_idx) = self.find_server_buffer(server_id) {
                     self.push_system(srv_idx, trailing_text(&args));
                 }
