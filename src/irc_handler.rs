@@ -207,14 +207,23 @@ impl App {
             }
             Command::NICK(new_nick) => {
                 if let Some(old_nick) = sender_nick {
-                    if old_nick.eq_ignore_ascii_case(&my_nick) {
+                    let is_self = old_nick.eq_ignore_ascii_case(&my_nick);
+                    if is_self {
                         self.set_nick(server_id, new_nick.clone());
                     }
                     let affected = self.affected_server_buffers(server_id, |buf| {
                         buf.rename_user(&old_nick, &new_nick)
                     });
-                    for idx in affected {
+                    if is_self && affected.is_empty() {
+                        let idx = self.target_buffer_for_server(server_id);
                         self.push_system(idx, format!("* {old_nick} is now known as {new_nick}"));
+                    } else {
+                        for idx in affected {
+                            self.push_system(
+                                idx,
+                                format!("* {old_nick} is now known as {new_nick}"),
+                            );
+                        }
                     }
                 }
             }

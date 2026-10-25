@@ -327,6 +327,20 @@ impl App {
         Some(self.active_buf().name.clone())
     }
 
+    fn send_irc(&mut self, server_id: &str, msg: impl Into<Message>) -> bool {
+        if let Some(sender) = self.sender_for(server_id) {
+            if sender.send(msg).is_ok() {
+                return true;
+            }
+            self.set_sender(server_id, None);
+        }
+        self.push_error(
+            self.active_buffer,
+            format!("Not connected to [{server_id}]"),
+        );
+        false
+    }
+
     fn send_privmsg_and_echo(
         &mut self,
         server_id: &str,
@@ -338,18 +352,18 @@ impl App {
     ) -> bool {
         let wire = wire_override.unwrap_or(&display_text);
         if let Some(sender) = self.sender_for(server_id) {
-            if sender.send_privmsg(target, wire).is_err() {
-                self.set_sender(server_id, None);
-                self.push_error(
-                    self.active_buffer,
-                    format!("Not connected to [{server_id}]; message not sent"),
-                );
-                return false;
+            if sender.send_privmsg(target, wire).is_ok() {
+                let nick = self.nick_for(server_id).to_string();
+                self.push_to_buffer(buf_idx, ChatLine::new(Some(nick), display_text, kind));
+                return true;
             }
+            self.set_sender(server_id, None);
         }
-        let nick = self.nick_for(server_id).to_string();
-        self.push_to_buffer(buf_idx, ChatLine::new(Some(nick), display_text, kind));
-        true
+        self.push_error(
+            self.active_buffer,
+            format!("Not connected to [{server_id}]; message not sent"),
+        );
+        false
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
@@ -536,8 +550,8 @@ impl App {
                 self.help_scroll = 0;
             }
             UserCommand::Join(channel) => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send_join(&channel);
+                if !self.send_irc(&server_id, Command::JOIN(channel.clone(), None, None)) {
+                    return;
                 }
                 let idx = self.ensure_buffer(&server_id, &channel, BufferKind::Channel);
                 self.buffers[idx].parted = false;
@@ -548,8 +562,8 @@ impl App {
                 else {
                     return;
                 };
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::PART(chan.clone(), reason));
+                if !self.send_irc(&server_id, Command::PART(chan.clone(), reason)) {
+                    return;
                 }
                 let buf = self.active_buf_mut();
                 buf.parted = true;
@@ -558,6 +572,13 @@ impl App {
                 self.push_system(self.active_buffer, format!("Left {chan}"));
             }
             UserCommand::Msg { target, text } => {
+                if self.sender_for(&server_id).is_none() {
+                    self.push_error(
+                        self.active_buffer,
+                        format!("Not connected to [{server_id}]; message not sent"),
+                    );
+                    return;
+                }
                 let kind = if is_channel_name(&target) {
                     BufferKind::Channel
                 } else {
@@ -592,14 +613,7 @@ impl App {
                 self.select_buffer(idx);
             }
             UserCommand::Nick(new_nick) => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::NICK(new_nick.clone()));
-                }
-                let old_nick = self.set_nick(&server_id, new_nick.clone());
-                self.affected_server_buffers(&server_id, |buf| {
-                    buf.rename_user(&old_nick, &new_nick)
-                });
-                self.push_system(self.active_buffer, format!("Nickname changed to {new_nick}"));
+                self.send_irc(&server_id, Command::NICK(new_nick));
             }
             UserCommand::Me(action) => {
                 let Some(target) = self.require_chat_target("Cannot send /me in a server buffer")
@@ -628,17 +642,21 @@ impl App {
                             self.active_buffer,
                             format!("* Topic for {chan}: {existing}"),
                         );
+                        if let Some(sender) = self.sender_for(&server_id) {
+                            let _ = sender.send(Command::TOPIC(chan, None));
+                        }
+                        return;
                     }
                 }
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::TOPIC(chan, new_topic));
-                }
+                self.send_irc(&server_id, Command::TOPIC(chan, new_topic));
             }
             UserCommand::Whois(target) => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::WHOIS(None, target.clone()));
+                if self.send_irc(&server_id, Command::WHOIS(None, target.clone())) {
+                    self.push_system(
+                        self.active_buffer,
+                        format!("* Querying WHOIS for {target}..."),
+                    );
                 }
-                self.push_system(self.active_buffer, format!("* Querying WHOIS for {target}..."));
             }
             UserCommand::Kick { nick, reason } => {
                 let Some(chan) =
@@ -646,9 +664,7 @@ impl App {
                 else {
                     return;
                 };
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::KICK(chan, nick, reason));
-                }
+                self.send_irc(&server_id, Command::KICK(chan, nick, reason));
             }
             UserCommand::Invite { nick, channel } => {
                 let target_chan = match channel {
@@ -664,13 +680,15 @@ impl App {
                         return;
                     }
                 };
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::INVITE(nick.clone(), target_chan.clone()));
+                if self.send_irc(
+                    &server_id,
+                    Command::INVITE(nick.clone(), target_chan.clone()),
+                ) {
+                    self.push_system(
+                        self.active_buffer,
+                        format!("* Invited {nick} to {target_chan}"),
+                    );
                 }
-                self.push_system(
-                    self.active_buffer,
-                    format!("* Invited {nick} to {target_chan}"),
-                );
             }
             UserCommand::Mode {
                 target,
@@ -694,36 +712,31 @@ impl App {
                     }
                     None => active_nick,
                 };
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let mut raw_args = vec![target_name.clone()];
-                    raw_args.extend(args.split_whitespace().map(str::to_string));
-                    let _ = sender.send(Command::Raw("MODE".to_string(), raw_args));
+                let mut raw_args = vec![target_name.clone()];
+                raw_args.extend(args.split_whitespace().map(str::to_string));
+                if self.send_irc(&server_id, Command::Raw("MODE".to_string(), raw_args)) {
+                    self.push_system(
+                        self.active_buffer,
+                        format!("* Mode {target_name} {args}").trim_end().to_string(),
+                    );
                 }
-                self.push_system(
-                    self.active_buffer,
-                    format!("* Mode {target_name} {args}").trim_end().to_string(),
-                );
             }
             UserCommand::Away(reason) => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::AWAY(reason.clone()));
+                if self.send_irc(&server_id, Command::AWAY(reason.clone())) {
+                    let text = match reason {
+                        Some(r) => format!("* Marked as away: {r}"),
+                        None => "* Cleared away status".to_string(),
+                    };
+                    self.push_system(self.active_buffer, text);
                 }
-                let text = match reason {
-                    Some(r) => format!("* Marked as away: {r}"),
-                    None => "* Cleared away status".to_string(),
-                };
-                self.push_system(self.active_buffer, text);
             }
             UserCommand::Motd => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::MOTD(None));
-                }
+                self.send_irc(&server_id, Command::MOTD(None));
             }
             UserCommand::List(filter) => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    let _ = sender.send(Command::LIST(filter, None));
+                if self.send_irc(&server_id, Command::LIST(filter, None)) {
+                    self.push_system(self.active_buffer, "* Requesting channel list...");
                 }
-                self.push_system(self.active_buffer, "* Requesting channel list...");
             }
             UserCommand::Buffer(target) => {
                 if let Ok(num) = target.parse::<usize>() {
@@ -799,18 +812,17 @@ impl App {
                 }
             }
             UserCommand::Raw(raw_cmd) => {
-                if let Some(sender) = self.sender_for(&server_id) {
-                    if let Ok(msg) = format!("{raw_cmd}\r\n").parse::<Message>() {
-                        let _ = sender.send(msg);
-                    } else {
+                let msg = format!("{raw_cmd}\r\n")
+                    .parse::<Message>()
+                    .unwrap_or_else(|_| {
                         let mut parts = raw_cmd.split_whitespace();
-                        if let Some(verb) = parts.next() {
-                            let args: Vec<String> = parts.map(str::to_string).collect();
-                            let _ = sender.send(Command::Raw(verb.to_string(), args));
-                        }
-                    }
+                        let verb = parts.next().unwrap_or_default().to_string();
+                        let args: Vec<String> = parts.map(str::to_string).collect();
+                        Command::Raw(verb, args).into()
+                    });
+                if self.send_irc(&server_id, msg) {
+                    self.push_system(self.active_buffer, format!("* >> {raw_cmd}"));
                 }
-                self.push_system(self.active_buffer, format!("* >> {raw_cmd}"));
             }
             UserCommand::Clear => {
                 let buf = self.active_buf_mut();
@@ -1462,5 +1474,25 @@ mod tests {
         );
         assert_eq!(app.buffers[rust_idx].users.len(), 0);
         assert_eq!(app.buffers[rust_idx].messages.len(), 0);
+    }
+
+    #[test]
+    fn rejects_outbound_commands_while_disconnected_and_defers_nick_update() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+
+        app.execute_user_command(UserCommand::Say("hello".into()));
+        assert_eq!(app.buffers[rust_idx].messages.len(), 1);
+        assert_eq!(app.buffers[rust_idx].messages[0].kind, LineKind::Error);
+
+        app.execute_user_command(UserCommand::Msg {
+            target: "bob".into(),
+            text: "hi".into(),
+        });
+        assert!(app.find_buffer("libera", "bob").is_none());
+
+        app.execute_user_command(UserCommand::Nick("new_nick".into()));
+        assert_eq!(app.nick_for("libera"), "irc_user");
     }
 }
