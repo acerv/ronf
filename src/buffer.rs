@@ -75,7 +75,10 @@ impl Buffer {
 
     pub fn push_line(&mut self, line: ChatLine, is_active: bool) {
         self.messages.push(line);
-        if !is_active {
+        if self.scroll_offset > 0 {
+            self.scroll_offset = self.scroll_offset.saturating_add(1);
+        }
+        if !is_active || self.scroll_offset > 0 {
             self.unread = true;
         }
     }

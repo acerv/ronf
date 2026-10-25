@@ -189,7 +189,7 @@ impl App {
                     is_channel && !is_from_self && contains_nick_mention(display_text, &my_nick);
 
                 if !is_from_self && (is_new_dm || !is_channel || is_mentioned) {
-                    if idx != self.active_buffer {
+                    if idx != self.active_buffer || self.buffers[idx].scroll_offset > 0 {
                         self.buffers[idx].highlight = true;
                     }
                     if is_new_dm {

@@ -500,9 +500,16 @@ impl App {
             KeyCode::PageDown => {
                 let buf = self.active_buf_mut();
                 buf.scroll_offset = buf.scroll_offset.saturating_sub(5);
+                if buf.scroll_offset == 0 {
+                    buf.unread = false;
+                    buf.highlight = false;
+                }
             }
             KeyCode::Esc => {
-                self.active_buf_mut().scroll_offset = 0;
+                let buf = self.active_buf_mut();
+                buf.scroll_offset = 0;
+                buf.unread = false;
+                buf.highlight = false;
             }
             KeyCode::Char(ch) => self.input.insert_char(ch),
             _ => {}
@@ -1740,5 +1747,44 @@ mod tests {
         );
         assert_eq!(app.buffers[rust_idx].messages[0].kind, LineKind::Action);
         assert_eq!(app.buffers[rust_idx].messages[0].content, "");
+    }
+
+    #[test]
+    fn keeps_scrollback_pinned_and_marks_unread_when_scrolled_up() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+
+        for i in 0..5 {
+            app.handle_irc_message(
+                "libera",
+                Message {
+                    tags: None,
+                    prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                    command: Command::PRIVMSG("#rust".into(), format!("line {i}")),
+                },
+            );
+        }
+
+        app.buffers[rust_idx].scroll_offset = 2;
+        assert!(!app.buffers[rust_idx].unread);
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("#rust".into(), "ping irc_user".into()),
+            },
+        );
+
+        assert_eq!(app.buffers[rust_idx].scroll_offset, 3);
+        assert!(app.buffers[rust_idx].unread);
+        assert!(app.buffers[rust_idx].highlight);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.buffers[rust_idx].scroll_offset, 0);
+        assert!(!app.buffers[rust_idx].unread);
+        assert!(!app.buffers[rust_idx].highlight);
     }
 }
