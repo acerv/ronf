@@ -221,7 +221,9 @@ impl App {
 
     pub fn find_buffer(&self, server_id: &str, name: &str) -> Option<usize> {
         self.buffers.iter().position(|b| {
-            b.server_id.eq_ignore_ascii_case(server_id) && b.name.eq_ignore_ascii_case(name)
+            b.kind != BufferKind::Server
+                && b.server_id.eq_ignore_ascii_case(server_id)
+                && b.name.eq_ignore_ascii_case(name)
         })
     }
 
@@ -257,7 +259,11 @@ impl App {
     /// Ensures a buffer for `(server_id, name, kind)` exists, inserting it at the end of
     /// `server_id`'s group in `self.buffers` so the tree remains grouped by server.
     pub fn ensure_buffer(&mut self, server_id: &str, name: &str, kind: BufferKind) -> usize {
-        if let Some(idx) = self.find_buffer(server_id, name) {
+        if let Some(idx) = self.buffers.iter().position(|b| {
+            b.kind == kind
+                && b.server_id.eq_ignore_ascii_case(server_id)
+                && b.name.eq_ignore_ascii_case(name)
+        }) {
             return idx;
         }
 
@@ -594,7 +600,12 @@ impl App {
                 }
             }
             UserCommand::Query { target, text } => {
-                let idx = self.ensure_buffer(&server_id, &target, BufferKind::DirectMessage);
+                let kind = if is_channel_name(&target) {
+                    BufferKind::Channel
+                } else {
+                    BufferKind::DirectMessage
+                };
+                let idx = self.ensure_buffer(&server_id, &target, kind);
                 if let Some(msg_text) = text {
                     if !self.send_privmsg_and_echo(
                         &server_id,
@@ -1596,5 +1607,25 @@ mod tests {
         );
 
         assert!(app.find_buffer("libera", "#unjoined").is_none());
+    }
+
+    #[test]
+    fn dm_nick_matching_server_id_does_not_collide_with_server_buffer() {
+        let mut app = test_app();
+        let srv_idx = app.find_server_buffer("libera").unwrap();
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("libera".into(), "l".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "hello".into()),
+            },
+        );
+
+        let dm_idx = app.find_buffer("libera", "libera").unwrap();
+        assert_ne!(dm_idx, srv_idx);
+        assert_eq!(app.buffers[dm_idx].kind, BufferKind::DirectMessage);
+        assert_eq!(app.buffers[dm_idx].messages[0].content, "hello");
     }
 }

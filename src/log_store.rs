@@ -140,7 +140,9 @@ pub(crate) fn discover_dm_buffers(
                 return None;
             }
             let already_exists = existing.iter().any(|b| {
-                b.server_id.eq_ignore_ascii_case(server_id) && b.name.eq_ignore_ascii_case(&stem)
+                b.kind != BufferKind::Server
+                    && b.server_id.eq_ignore_ascii_case(server_id)
+                    && b.name.eq_ignore_ascii_case(&stem)
             });
             (!already_exists).then_some(stem)
         })
