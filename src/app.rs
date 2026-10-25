@@ -756,6 +756,7 @@ impl App {
                 if let Some(sender) = self.set_sender(&server_id, None) {
                     let _ = sender.send(Command::QUIT(Some("Reconnecting...".to_string())));
                 }
+                self.reset_server_channels(&server_id);
                 self.push_system(self.active_buffer, format!("* Reconnecting to [{server_id}]..."));
             }
             UserCommand::Ignore(maybe_nick) => match maybe_nick {
@@ -1540,5 +1541,25 @@ mod tests {
         let bob_idx = app.find_buffer("libera", "bob").unwrap();
         assert_eq!(app.buffers[bob_idx].kind, BufferKind::DirectMessage);
         assert_eq!(app.buffers[bob_idx].messages[0].content, "hello bob");
+    }
+
+    #[test]
+    fn clears_stale_channel_users_and_topic_on_disconnect() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        let oftc_idx = app.find_buffer("oftc", "#rust").unwrap();
+
+        app.buffers[rust_idx].users = vec!["@alice".into(), "bob".into()];
+        app.buffers[rust_idx].topic = Some("old topic".into());
+        app.buffers[oftc_idx].users = vec!["charlie".into()];
+
+        app.handle_server_event(crate::irc_handler::ServerEvent::Error {
+            server_id: "libera".into(),
+            error: "Disconnected".into(),
+        });
+
+        assert!(app.buffers[rust_idx].users.is_empty());
+        assert!(app.buffers[rust_idx].topic.is_none());
+        assert_eq!(app.buffers[oftc_idx].users, vec!["charlie"]);
     }
 }

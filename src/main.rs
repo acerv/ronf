@@ -81,7 +81,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Resul
 
 enum SessionEnd {
     ReceiverClosed,
-    Retry(Option<String>),
+    Retry(String),
 }
 
 async fn run_server_loop(
@@ -92,7 +92,7 @@ async fn run_server_loop(
     loop {
         match connect_and_stream(&server_id, irc_cfg.clone(), &tx).await {
             SessionEnd::ReceiverClosed => break,
-            SessionEnd::Retry(Some(error)) => {
+            SessionEnd::Retry(error) => {
                 if tx
                     .send(ServerEvent::Error {
                         server_id: server_id.clone(),
@@ -103,7 +103,6 @@ async fn run_server_loop(
                     break;
                 }
             }
-            SessionEnd::Retry(None) => {}
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -116,11 +115,11 @@ async fn connect_and_stream(
 ) -> SessionEnd {
     let mut client = match Client::from_config(irc_cfg).await {
         Ok(c) => c,
-        Err(err) => return SessionEnd::Retry(Some(format!("Connection failed: {err} (retrying in 5s)"))),
+        Err(err) => return SessionEnd::Retry(format!("Connection failed: {err} (retrying in 5s)")),
     };
 
     if let Err(err) = client.identify() {
-        return SessionEnd::Retry(Some(format!("Failed to identify: {err} (retrying in 5s)")));
+        return SessionEnd::Retry(format!("Failed to identify: {err} (retrying in 5s)"));
     }
 
     if tx
@@ -136,9 +135,9 @@ async fn connect_and_stream(
     let mut stream = match client.stream() {
         Ok(s) => s,
         Err(err) => {
-            return SessionEnd::Retry(Some(format!(
+            return SessionEnd::Retry(format!(
                 "Failed to open IRC stream: {err} (retrying in 5s)"
-            )));
+            ));
         }
     };
 
@@ -156,10 +155,10 @@ async fn connect_and_stream(
                 }
             }
             Err(err) => {
-                return SessionEnd::Retry(Some(format!("Disconnected: {err} (reconnecting in 5s)")));
+                return SessionEnd::Retry(format!("Disconnected: {err} (reconnecting in 5s)"));
             }
         }
     }
 
-    SessionEnd::Retry(None)
+    SessionEnd::Retry("Connection closed (reconnecting in 5s)".to_string())
 }

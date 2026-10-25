@@ -65,13 +65,19 @@ impl App {
         }
     }
 
+    pub(crate) fn reset_server_channels(&mut self, server_id: &str) {
+        self.affected_server_buffers(server_id, |buf| {
+            buf.users.clear();
+            buf.pending_names.clear();
+            buf.topic = None;
+            false
+        });
+    }
+
     pub fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::Connected { server_id, sender } => {
-                self.affected_server_buffers(&server_id, |buf| {
-                    buf.pending_names.clear();
-                    false
-                });
+                self.reset_server_channels(&server_id);
                 self.set_sender(&server_id, Some(sender));
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_system(idx, format!("Connected to [{server_id}]"));
@@ -79,6 +85,7 @@ impl App {
             }
             ServerEvent::Error { server_id, error } => {
                 self.set_sender(&server_id, None);
+                self.reset_server_channels(&server_id);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_error(idx, error);
                 }
