@@ -550,15 +550,26 @@ pub fn help_line_count() -> usize {
     cached_help().0.len()
 }
 
+pub fn help_popup_height(area_height: u16) -> u16 {
+    let total_lines = help_line_count() as u16;
+    (total_lines + 2)
+        .min(area_height.saturating_sub(2).max(6))
+        .min(area_height)
+}
+
+pub fn help_max_scroll(area_height: u16) -> usize {
+    let inner_h = help_popup_height(area_height).saturating_sub(2) as usize;
+    help_line_count().saturating_sub(inner_h)
+}
+
 fn draw_help_popup(f: &mut Frame, app: &App) {
     let area = f.area();
     let (lines, content_width) = cached_help();
-    let total_lines = lines.len() as u16;
 
     let title = " Help — q/Esc to close, j/k to scroll ";
     let title_len = title.chars().count() as u16;
     let popup_w = (*content_width + 4).max(title_len + 2).min(area.width);
-    let popup_h = (total_lines + 2).min(area.height.saturating_sub(2).max(6));
+    let popup_h = help_popup_height(area.height);
 
     let x = area.width.saturating_sub(popup_w) / 2;
     let y = area.height.saturating_sub(popup_h) / 2;
@@ -580,7 +591,7 @@ fn draw_help_popup(f: &mut Frame, app: &App) {
         inner.height,
     );
 
-    let max_scroll = lines.len().saturating_sub(padded.height as usize);
+    let max_scroll = help_max_scroll(area.height);
     let scroll = app.help_scroll.min(max_scroll) as u16;
 
     let paragraph = Paragraph::new(lines.clone()).scroll((scroll, 0));

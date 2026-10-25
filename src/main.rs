@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
 
 async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Result<()> {
     let mut app = App::from_config(&app_config);
+    app.set_terminal_height(terminal.size()?.height);
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
 
     for (server_id, srv_cfg) in app_config.enabled_servers() {
@@ -57,7 +58,9 @@ async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Resul
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         app.handle_key_event(key);
                     }
-                    Some(Ok(Event::Resize(_, _))) => {}
+                    Some(Ok(Event::Resize(_, h))) => {
+                        app.set_terminal_height(h);
+                    }
                     Some(Err(_)) | None => {
                         app.should_quit = true;
                     }

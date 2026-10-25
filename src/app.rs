@@ -32,6 +32,7 @@ pub struct App {
     pub log_dir: Option<PathBuf>,
     pub show_help: bool,
     pub help_scroll: usize,
+    pub term_height: u16,
     pub should_quit: bool,
 }
 
@@ -99,8 +100,14 @@ impl App {
             log_dir,
             show_help: false,
             help_scroll: 0,
+            term_height: 24,
             should_quit: false,
         }
+    }
+
+    pub fn set_terminal_height(&mut self, height: u16) {
+        self.term_height = height;
+        self.help_scroll = self.help_scroll.min(crate::ui::help_max_scroll(height));
     }
 
     pub fn history_limit_for(&self, server_id: &str) -> usize {
@@ -503,7 +510,7 @@ impl App {
     }
 
     fn handle_help_key_event(&mut self, key: KeyEvent) {
-        let max_scroll = crate::ui::help_line_count().saturating_sub(1);
+        let max_scroll = crate::ui::help_max_scroll(self.term_height);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl {
             match key.code {
@@ -1685,5 +1692,19 @@ mod tests {
         assert!(app3.find_buffer("libera", "bob").is_some());
 
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn clamps_help_scroll_to_viewport_height() {
+        let mut app = test_app();
+        app.set_terminal_height(40);
+        app.execute_user_command(UserCommand::Help);
+
+        let expected_max = crate::ui::help_max_scroll(40);
+        app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, expected_max);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, expected_max - 1);
     }
 }
