@@ -1562,4 +1562,39 @@ mod tests {
         assert!(app.buffers[rust_idx].topic.is_none());
         assert_eq!(app.buffers[oftc_idx].users, vec!["charlie"]);
     }
+
+    #[test]
+    fn topic_and_names_numerics_do_not_create_unjoined_buffers() {
+        let mut app = test_app();
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Response(
+                    Response::RPL_TOPIC,
+                    vec!["irc_user".into(), "#unjoined".into(), "Welcome".into()],
+                ),
+            },
+        );
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: None,
+                command: Command::Response(
+                    Response::RPL_NAMREPLY,
+                    vec![
+                        "irc_user".into(),
+                        "=".into(),
+                        "#unjoined".into(),
+                        "@alice bob".into(),
+                    ],
+                ),
+            },
+        );
+
+        assert!(app.find_buffer("libera", "#unjoined").is_none());
+    }
 }

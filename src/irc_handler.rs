@@ -44,8 +44,12 @@ impl App {
         topic: Option<String>,
         announce_empty: bool,
     ) {
-        let idx = self.ensure_buffer(server_id, chan, BufferKind::Channel);
-        self.buffers[idx].topic = topic.clone();
+        let idx = if let Some(chan_idx) = self.find_buffer(server_id, chan) {
+            self.buffers[chan_idx].topic = topic.clone();
+            chan_idx
+        } else {
+            self.target_buffer_for_server(server_id)
+        };
         match topic {
             Some(t) => self.push_system(idx, format!("* Topic for {chan}: {t}")),
             None if announce_empty => {
@@ -301,10 +305,16 @@ impl App {
             }
             Response::RPL_NAMREPLY => {
                 if args.len() >= 4 {
-                    let idx = self.ensure_buffer(server_id, &args[2], BufferKind::Channel);
-                    self.buffers[idx]
-                        .pending_names
-                        .extend(args[3].split_whitespace().map(str::to_string));
+                    if let Some(idx) = self.find_buffer(server_id, &args[2]) {
+                        self.buffers[idx]
+                            .pending_names
+                            .extend(args[3].split_whitespace().map(str::to_string));
+                    } else {
+                        self.push_system(
+                            srv_target,
+                            format!("* [names] {}: {}", args[2], args[3].trim()),
+                        );
+                    }
                 }
             }
             Response::RPL_ENDOFNAMES => {
