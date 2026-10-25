@@ -331,6 +331,20 @@ impl App {
                     );
                 }
             }
+            Command::UserMODE(target, modes) => {
+                let by = sender_nick.unwrap_or_else(|| "server".to_string());
+                let mode_strs: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
+                let idx = self
+                    .find_buffer(server_id, &target)
+                    .unwrap_or_else(|| self.target_buffer_for_server(server_id));
+                let mode_str = mode_strs.join(" ");
+                let text = if mode_str.is_empty() {
+                    format!("* {by} sets mode on {target}")
+                } else {
+                    format!("* {by} sets mode {mode_str} on {target}")
+                };
+                self.push_system(idx, text);
+            }
             Command::Response(resp, args) => {
                 self.handle_numeric_response(server_id, resp, args);
             }
@@ -357,6 +371,32 @@ impl App {
     fn handle_numeric_response(&mut self, server_id: &str, resp: Response, args: Vec<String>) {
         let srv_target = self.target_buffer_for_server(server_id);
         match resp {
+            Response::RPL_CHANNELMODEIS => {
+                if args.len() >= 2 {
+                    let (chan, modes) = if is_channel_name(&args[0]) {
+                        (&args[0], args[1..].join(" "))
+                    } else if args.len() >= 3 {
+                        (&args[1], args[2..].join(" "))
+                    } else {
+                        (&args[1], String::new())
+                    };
+                    let idx = self.find_buffer(server_id, chan).unwrap_or(srv_target);
+                    let text = if modes.is_empty() {
+                        format!("* Mode for {chan}")
+                    } else {
+                        format!("* Mode for {chan} is {modes}")
+                    };
+                    self.push_system(idx, text);
+                }
+            }
+            Response::RPL_UMODEIS => {
+                let modes = if args.len() >= 2 {
+                    args[1..].join(" ")
+                } else {
+                    args.join(" ")
+                };
+                self.push_system(srv_target, format!("* User mode is {modes}"));
+            }
             Response::RPL_NOTOPIC => {
                 if args.len() >= 2 {
                     self.set_channel_topic(server_id, &args[1], None, true);

@@ -251,19 +251,35 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             Some(UserCommand::Invite { nick, channel })
         }
         "/mode" => {
-            let (first, rem) = split_first_arg(rest)?;
-            if is_channel_name(&first) {
+            if rest.is_empty() {
                 Some(UserCommand::Mode {
-                    target: Some(first),
-                    args: rem.unwrap_or_default(),
+                    target: None,
+                    args: String::new(),
                     channel_only: false,
                 })
             } else {
-                Some(UserCommand::Mode {
-                    target: None,
-                    args: rest.to_string(),
-                    channel_only: false,
-                })
+                let (first, rem) = split_first_arg(rest)?;
+                if is_channel_name(&first) {
+                    Some(UserCommand::Mode {
+                        target: Some(first),
+                        args: rem.unwrap_or_default(),
+                        channel_only: false,
+                    })
+                } else if !first.starts_with(['+', '-'])
+                    && rem.as_deref().map_or(false, |r| r.starts_with(['+', '-']))
+                {
+                    Some(UserCommand::Mode {
+                        target: Some(first),
+                        args: rem.unwrap_or_default(),
+                        channel_only: false,
+                    })
+                } else {
+                    Some(UserCommand::Mode {
+                        target: None,
+                        args: rest.to_string(),
+                        channel_only: false,
+                    })
+                }
             }
         }
         "/ban" | "/op" | "/deop" | "/voice" | "/devoice" => {
@@ -316,6 +332,38 @@ mod tests {
         assert_eq!(
             parse_user_command("/buffer #rust"),
             Some(UserCommand::Buffer("#rust".to_string()))
+        );
+        assert_eq!(
+            parse_user_command("/mode"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: String::new(),
+                channel_only: false,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/mode mynick +i"),
+            Some(UserCommand::Mode {
+                target: Some("mynick".to_string()),
+                args: "+i".to_string(),
+                channel_only: false,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/mode #rust +m"),
+            Some(UserCommand::Mode {
+                target: Some("#rust".to_string()),
+                args: "+m".to_string(),
+                channel_only: false,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/mode +i"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: "+i".to_string(),
+                channel_only: false,
+            })
         );
         assert_eq!(
             parse_user_command("/op alice"),

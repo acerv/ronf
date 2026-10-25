@@ -919,7 +919,7 @@ impl App {
 mod tests {
     use std::fs;
 
-    use irc::proto::{ChannelMode, Mode, Prefix, Response};
+    use irc::proto::{ChannelMode, Mode, Prefix, Response, UserMode};
 
     use super::*;
     use crate::buffer::contains_nick_mention;
@@ -1917,5 +1917,99 @@ mod tests {
         assert_eq!(app.buffers[rust_idx].scroll_offset, 0);
         assert!(!app.buffers[rust_idx].unread);
         assert!(!app.buffers[rust_idx].highlight);
+    }
+
+    #[test]
+    fn handles_mode_responses_and_user_mode_events() {
+        let mut app = test_app();
+        let srv_idx = app.find_server_buffer("libera").unwrap();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::ServerName("irc.libera.chat".into())),
+                command: Command::Response(
+                    Response::RPL_CHANNELMODEIS,
+                    vec!["irc_user".into(), "#rust".into(), "+nt".into()],
+                ),
+            },
+        );
+        assert_eq!(
+            app.buffers[rust_idx].messages.last().unwrap().content,
+            "* Mode for #rust is +nt"
+        );
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::ServerName("irc.libera.chat".into())),
+                command: Command::Response(
+                    Response::RPL_UMODEIS,
+                    vec!["irc_user".into(), "+i".into()],
+                ),
+            },
+        );
+        assert_eq!(
+            app.buffers[srv_idx].messages.last().unwrap().content,
+            "* User mode is +i"
+        );
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("irc_user".into(), "u".into(), "h".into())),
+                command: Command::UserMODE(
+                    "irc_user".into(),
+                    vec![Mode::Plus(UserMode::Invisible, None)],
+                ),
+            },
+        );
+        assert_eq!(
+            app.buffers[srv_idx].messages.last().unwrap().content,
+            "* irc_user sets mode +i on irc_user"
+        );
+    }
+
+    #[tokio::test]
+    async fn executes_mode_command_with_target_or_defaults() {
+        let mut app = test_app();
+        let irc_cfg = irc::client::data::Config {
+            nickname: Some("irc_user".into()),
+            server: Some("irc.example.org".into()),
+            use_mock_connection: true,
+            ..Default::default()
+        };
+        let client = irc::client::Client::from_config(irc_cfg).await.unwrap();
+        app.set_sender("libera", Some(client.sender()));
+
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+
+        let cmd = crate::command::parse_user_command("/mode mynick +i").unwrap();
+        app.execute_user_command(cmd);
+        assert_eq!(
+            app.buffers[rust_idx].messages.last().unwrap().content,
+            "* Mode mynick +i"
+        );
+
+        let cmd = crate::command::parse_user_command("/mode").unwrap();
+        app.execute_user_command(cmd);
+        assert_eq!(
+            app.buffers[rust_idx].messages.last().unwrap().content,
+            "* Mode #rust"
+        );
+
+        let srv_idx = app.find_server_buffer("libera").unwrap();
+        app.select_buffer(srv_idx);
+        let cmd = crate::command::parse_user_command("/mode").unwrap();
+        app.execute_user_command(cmd);
+        assert_eq!(
+            app.buffers[srv_idx].messages.last().unwrap().content,
+            "* Mode irc_user"
+        );
     }
 }
