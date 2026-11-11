@@ -162,7 +162,15 @@ impl App {
                                 .unwrap_or(self.active_buffer)
                         };
                         let from = sender_nick.as_deref().unwrap_or("someone");
-                        self.push_system(idx, format!("* [ctcp] {from}: {ctcp}"));
+                        let ctcp_owned = ctcp.to_string();
+                        self.push_system(idx, format!("* [ctcp] {from}: {ctcp_owned}"));
+                        if let Some(ref nick) = sender_nick {
+                            if let Some(reply) = build_ctcp_reply(&ctcp_owned) {
+                                if let Some(sender) = self.sender_for(server_id) {
+                                    let _ = sender.send_notice(nick, format!("\x01{reply}\x01"));
+                                }
+                            }
+                        }
                         return;
                     }
                     None => None,
@@ -559,6 +567,25 @@ fn parse_ctcp(text: &str) -> Option<CtcpPayload<'_>> {
         Some(CtcpPayload::Action(&inner[7..]))
     } else {
         Some(CtcpPayload::Other(inner))
+    }
+}
+
+fn build_ctcp_reply(ctcp: &str) -> Option<String> {
+    let mut parts = ctcp.splitn(2, ' ');
+    let cmd = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("");
+    if cmd.eq_ignore_ascii_case("VERSION") {
+        Some(format!("VERSION ronf {}", env!("CARGO_PKG_VERSION")))
+    } else if cmd.eq_ignore_ascii_case("PING") {
+        if rest.is_empty() {
+            Some("PING".to_string())
+        } else {
+            Some(format!("PING {rest}"))
+        }
+    } else if cmd.eq_ignore_ascii_case("TIME") {
+        Some(format!("TIME {}", chrono::Local::now().to_rfc2822()))
+    } else {
+        None
     }
 }
 

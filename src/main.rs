@@ -438,4 +438,98 @@ mod tests {
         let _ = srv_loop.await;
         server_thread.join().unwrap();
     }
+
+    #[tokio::test]
+    async fn ignored_user_does_not_trigger_ctcp_auto_reply() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_thread = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            use std::io::{BufRead, BufReader, Write};
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut received = Vec::new();
+            let mut line = String::new();
+            let mut welcomed = false;
+            while reader.read_line(&mut line).unwrap() > 0 {
+                received.push(line.clone());
+                if !welcomed && line.starts_with("USER ") {
+                    welcomed = true;
+                    let _ = socket.write_all(
+                        b":mock.server 001 irc_user :Welcome\r\n\
+                          :ignored_bot!b@h PRIVMSG irc_user :\x01VERSION\x01\r\n\
+                          :friend!f@h PRIVMSG irc_user :\x01PING 42\x01\r\n",
+                    );
+                    let _ = socket.flush();
+                }
+                if line.contains("NOTICE friend :\x01PING 42\x01") {
+                    break;
+                }
+                line.clear();
+            }
+            received
+        });
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            [servers.test_srv]
+            server = "127.0.0.1"
+            port = {port}
+            use_tls = false
+        "##
+        );
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        app.execute_user_command(crate::command::UserCommand::Ignore(Some(
+            "ignored_bot".into(),
+        )));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (srv_id, srv_cfg) = cfg.enabled_servers().next().unwrap();
+        let irc_cfg = srv_cfg
+            .to_irc_config(cfg.default_nickname.as_deref())
+            .unwrap();
+        let reconnect = app.reconnect_notify_for(srv_id).unwrap();
+
+        let srv_loop = tokio::spawn(run_server_loop(
+            srv_id.clone(),
+            irc_cfg,
+            tx,
+            shutdown_rx,
+            reconnect,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(ev) = rx.recv().await {
+                let is_friend_ping = matches!(
+                    &ev,
+                    ServerEvent::Message { message, .. }
+                        if matches!(&message.command, Command::PRIVMSG(_, t) if t.contains("PING"))
+                );
+                app.handle_server_event(ev);
+                if is_friend_ping {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let _ = shutdown_tx.send(true);
+        let _ = srv_loop.await;
+        let received = server_thread.join().unwrap();
+
+        assert!(
+            !received.iter().any(|l| l.contains("NOTICE ignored_bot")),
+            "Ignored user must not receive CTCP reply: {received:?}"
+        );
+        assert!(
+            received
+                .iter()
+                .any(|l| l.contains("NOTICE friend :\x01PING 42\x01")),
+            "Non-ignored user should receive CTCP PING reply: {received:?}"
+        );
+    }
 }
