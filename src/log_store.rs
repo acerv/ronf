@@ -95,21 +95,32 @@ pub(crate) fn set_dm_closed(base_dir: &Path, server_id: &str, dm_name: &str, clo
     let _ = fs::write(path, body);
 }
 
+fn sanitize_single_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if matches!(c, '\r' | '\n') { ' ' } else { c })
+        .collect()
+}
+
 pub(crate) fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
     let path = buffer_log_path(base_dir, server_id, buf_name);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let clean_content = sanitize_single_line(&line.content);
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         match (&line.kind, &line.sender) {
             (LineKind::Action, Some(sender)) => {
-                let _ = writeln!(file, "[{}] * {} {}", line.timestamp, sender, line.content);
+                if clean_content.is_empty() {
+                    let _ = writeln!(file, "[{}] * {}", line.timestamp, sender);
+                } else {
+                    let _ = writeln!(file, "[{}] * {} {}", line.timestamp, sender, clean_content);
+                }
             }
             (_, Some(sender)) => {
-                let _ = writeln!(file, "[{}] <{}> {}", line.timestamp, sender, line.content);
+                let _ = writeln!(file, "[{}] <{}> {}", line.timestamp, sender, clean_content);
             }
             (_, None) => {
-                let _ = writeln!(file, "[{}] {}", line.timestamp, line.content);
+                let _ = writeln!(file, "[{}] {}", line.timestamp, clean_content);
             }
         }
     }
@@ -119,7 +130,13 @@ fn parse_log_line(raw: &str) -> Option<ChatLine> {
     let rest = raw.strip_prefix('[')?;
     let (ts, after_ts) = rest.split_once("] ")?;
     if let Some(action_rest) = after_ts.strip_prefix("* ") {
-        let (actor, act_text) = action_rest.split_once(' ')?;
+        let (actor, act_text) = match action_rest.split_once(' ') {
+            Some((a, t)) => (a, t),
+            None => (action_rest.trim(), ""),
+        };
+        if actor.is_empty() {
+            return None;
+        }
         Some(ChatLine {
             timestamp: ts.to_string(),
             sender: Some(actor.to_string()),
@@ -248,5 +265,15 @@ mod tests {
         assert_eq!(percent_decode("alice%5Bm%5D"), "alice[m]");
         assert_eq!(percent_decode("bob%7Cafk"), "bob|afk");
         assert_eq!(percent_decode("plain_nick"), "plain_nick");
+
+        assert_eq!(
+            parse_log_line("[12:00:00] * alice"),
+            Some(ChatLine {
+                timestamp: "12:00:00".into(),
+                sender: Some("alice".into()),
+                content: "".into(),
+                kind: LineKind::Action,
+            })
+        );
     }
 }
