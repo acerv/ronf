@@ -5,8 +5,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 
 use crate::app::App;
 use crate::buffer::{
-    contains_nick_mention, extract_user_prefixes, is_channel_name, is_valid_nick, Buffer,
-    BufferKind, ChatLine, LineKind,
+    contains_nick_mention, is_channel_name, is_valid_nick, Buffer, BufferKind, ChatLine,
+    LineKind,
 };
 
 #[derive(Debug)]
@@ -43,6 +43,24 @@ impl App {
                 (buf.server_id.eq_ignore_ascii_case(server_id) && f(buf)).then_some(i)
             })
             .collect()
+    }
+
+    fn channel_message_target<'a>(&self, server_id: &str, target: &'a str) -> Option<&'a str> {
+        let mut candidate = target;
+        let mut fallback = None;
+        loop {
+            if is_channel_name(candidate) {
+                // Prefer a known channel: '&' and '+' can be part of its name.
+                if self.find_buffer(server_id, candidate).is_some() {
+                    return Some(candidate);
+                }
+                fallback = Some(candidate);
+            }
+            match candidate.as_bytes().first() {
+                Some(b'~' | b'&' | b'@' | b'%' | b'+') => candidate = &candidate[1..],
+                _ => return fallback,
+            }
+        }
     }
 
     fn set_channel_topic(
@@ -169,12 +187,9 @@ impl App {
         match msg.command {
             Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
             Command::PRIVMSG(raw_target, text) => {
-                let (_, stripped_target) = extract_user_prefixes(&raw_target);
-                let target = if is_channel_name(stripped_target) {
-                    stripped_target.to_string()
-                } else {
-                    raw_target
-                };
+                let target = self.channel_message_target(server_id, &raw_target)
+                    .unwrap_or(&raw_target)
+                    .to_string();
                 let is_channel = is_channel_name(&target);
                 let ctcp_action = match parse_ctcp(&text) {
                     Some(CtcpPayload::Action(act)) => Some(act.to_string()),
@@ -260,14 +275,7 @@ impl App {
                     self.push_system(idx, format!("* [ctcp] {from} reply: {ctcp}"));
                     return;
                 }
-                let (_, stripped_target) = extract_user_prefixes(&target);
-                let chan_target = if is_channel_name(stripped_target) {
-                    Some(stripped_target)
-                } else if is_channel_name(&target) {
-                    Some(target.as_str())
-                } else {
-                    None
-                };
+                let chan_target = self.channel_message_target(server_id, &target);
                 let idx = if let Some(chan) = chan_target {
                     self.find_buffer(server_id, chan)
                         .unwrap_or_else(|| self.target_buffer_for_server(server_id))

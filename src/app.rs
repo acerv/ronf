@@ -1196,6 +1196,64 @@ mod tests {
     }
 
     #[test]
+    fn routes_status_messages_and_notices_to_channels() {
+        for (target, channel) in [
+            ("#rust", "#rust"),
+            ("@#rust", "#rust"),
+            ("+#rust", "#rust"),
+            ("@+#rust", "#rust"),
+            ("&local", "&local"),
+            ("@&local", "&local"),
+            ("+&local", "&local"),
+            ("@+&local", "&local"),
+            ("+modeless", "+modeless"),
+            ("@+modeless", "+modeless"),
+            ("++modeless", "+modeless"),
+            ("&+nested", "&+nested"),
+            ("@&+nested", "&+nested"),
+            ("++nested", "++nested"),
+            ("@++nested", "++nested"),
+        ] {
+            for notice in [false, true] {
+                let mut app = test_app();
+                let idx = app.ensure_buffer("libera", channel, BufferKind::Channel);
+                let count = app.buffers.len();
+                let command = if notice {
+                    Command::NOTICE(target.into(), "channel message".into())
+                } else {
+                    Command::PRIVMSG(target.into(), "channel message".into())
+                };
+                app.handle_irc_message("libera", Message {
+                    tags: None,
+                    prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                    command,
+                });
+                assert_eq!(app.buffers.len(), count, "Unexpected buffer for {target}");
+                assert_eq!(app.buffers[idx].messages.len(), 1, "Misrouted {target}");
+                assert!(app.buffers[idx].messages[0].content.contains("channel message"));
+                assert!(app.find_buffer("libera", "alice").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn routes_status_messages_to_untracked_channels() {
+        for (target, channel) in [
+            ("@&local", "&local"),
+            ("@+modeless", "+modeless"),
+            ("@+#new", "#new"),
+        ] {
+            let mut app = test_app();
+            let message = format!(":alice!a@h PRIVMSG {target} :hello\r\n");
+            app.handle_irc_message("libera", message.parse().unwrap());
+            let idx = app.find_buffer("libera", channel).expect("Missing channel buffer");
+            assert_eq!(app.buffers[idx].kind, BufferKind::Channel);
+            assert_eq!(app.buffers[idx].messages[0].content, "hello");
+            assert!(app.find_buffer("libera", "alice").is_none());
+        }
+    }
+
+    #[test]
     fn isolates_buffers_across_servers() {
         let mut app = test_app();
         let libera_rust = app.find_buffer("libera", "#rust").unwrap();
