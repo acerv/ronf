@@ -18,3 +18,4 @@ ratatui = "0.29"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
+unicode-width = "0.2"

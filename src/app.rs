@@ -465,7 +465,7 @@ impl App {
                     self.input.delete_word_backwards();
                     return;
                 }
-                _ => {}
+                _ => return,
             }
         }
 
@@ -500,7 +500,7 @@ impl App {
                     self.select_buffer(idx);
                     return;
                 }
-                _ => {}
+                _ => return,
             }
         }
 
@@ -1191,6 +1191,10 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input.text, "ab\u{00a0}alice ");
         app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.text, "ab\u{00a0}");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
         assert_eq!(app.input.text, "ab\u{00a0}");
     }
 

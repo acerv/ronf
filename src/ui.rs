@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::App;
 use crate::buffer::{contains_nick_mention, strip_user_prefix, BufferKind, ChatLine, LineKind};
@@ -374,17 +375,26 @@ fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
     let buf = app.active_buf();
     let nick = app.active_nick();
     let prompt = format!(" [{nick} @ {}/{}] > ", buf.server_id, buf.name);
-    let prompt_width = prompt.chars().count();
+    let prompt_width = UnicodeWidthStr::width(prompt.as_str());
 
     let avail_width = (area.width as usize).saturating_sub(prompt_width);
-    let cursor_chars = app.input.text[..app.input.cursor_pos].chars().count();
-    let horizontal_scroll = if avail_width > 0 && cursor_chars >= avail_width {
-        cursor_chars - avail_width + 1
-    } else {
-        0
-    };
+    let before_cursor = &app.input.text[..app.input.cursor_pos];
+    let cursor_col = UnicodeWidthStr::width(before_cursor);
 
-    let visible_input: String = app.input.text.chars().skip(horizontal_scroll).collect();
+    let mut skipped_bytes = 0usize;
+    let mut skipped_width = 0usize;
+    if avail_width > 0 && cursor_col >= avail_width {
+        let target_skip = cursor_col - avail_width + 1;
+        for (idx, ch) in before_cursor.char_indices() {
+            if skipped_width >= target_skip {
+                break;
+            }
+            skipped_width += UnicodeWidthChar::width(ch).unwrap_or(0);
+            skipped_bytes = idx + ch.len_utf8();
+        }
+    }
+
+    let visible_input = &app.input.text[skipped_bytes..];
     let line = Line::from(vec![
         Span::styled(
             prompt,
@@ -392,15 +402,16 @@ fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(visible_input),
+        Span::raw(visible_input.to_string()),
     ]);
     f.render_widget(Paragraph::new(line), area);
 
-    if !app.show_help {
+    if !app.show_help && area.width > 0 && area.height > 0 {
+        let cursor_offset = cursor_col.saturating_sub(skipped_width);
         let cursor_x = area
             .x
             .saturating_add(prompt_width as u16)
-            .saturating_add((cursor_chars - horizontal_scroll) as u16)
+            .saturating_add(cursor_offset as u16)
             .min(area.right().saturating_sub(1));
         f.set_cursor_position(Position::new(cursor_x, area.y));
     }
