@@ -121,32 +121,48 @@ impl App {
         (self.term_height as usize).saturating_sub(2).max(1)
     }
 
-    pub fn history_limit_for(&self, server_id: &str) -> usize {
+    fn server_state(&self, server_id: &str) -> Option<&ServerState> {
+        self.servers.get(server_id).or_else(|| {
+            self.servers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(server_id))
+                .map(|(_, v)| v)
+        })
+    }
+
+    fn server_state_mut(&mut self, server_id: &str) -> Option<&mut ServerState> {
+        if self.servers.contains_key(server_id) {
+            return self.servers.get_mut(server_id);
+        }
         self.servers
-            .get(server_id)
+            .iter_mut()
+            .find(|(k, _)| k.eq_ignore_ascii_case(server_id))
+            .map(|(_, v)| v)
+    }
+
+    pub fn history_limit_for(&self, server_id: &str) -> usize {
+        self.server_state(server_id)
             .map(|s| s.history_limit)
             .unwrap_or(DEFAULT_HISTORY_LIMIT)
     }
 
     pub fn should_show_join_part(&self, server_id: &str) -> bool {
-        self.servers
-            .get(server_id)
+        self.server_state(server_id)
             .map(|s| s.show_join_part)
             .unwrap_or(true)
     }
 
     pub fn reconnect_notify_for(&self, server_id: &str) -> Option<Arc<Notify>> {
-        self.servers
-            .get(server_id)
+        self.server_state(server_id)
             .map(|s| Arc::clone(&s.reconnect_notify))
     }
 
     pub fn sender_for(&self, server_id: &str) -> Option<&Sender> {
-        self.servers.get(server_id).and_then(|s| s.sender.as_ref())
+        self.server_state(server_id).and_then(|s| s.sender.as_ref())
     }
 
     pub(crate) fn set_nick(&mut self, server_id: &str, new_nick: String) -> String {
-        if let Some(srv) = self.servers.get_mut(server_id) {
+        if let Some(srv) = self.server_state_mut(server_id) {
             std::mem::replace(&mut srv.nick, new_nick)
         } else {
             self.servers.insert(
@@ -164,7 +180,7 @@ impl App {
     }
 
     pub(crate) fn set_sender(&mut self, server_id: &str, sender: Option<Sender>) -> Option<Sender> {
-        if let Some(srv) = self.servers.get_mut(server_id) {
+        if let Some(srv) = self.server_state_mut(server_id) {
             std::mem::replace(&mut srv.sender, sender)
         } else {
             if let Some(s) = sender {
@@ -196,8 +212,7 @@ impl App {
     }
 
     pub fn nick_for(&self, server_id: &str) -> &str {
-        self.servers
-            .get(server_id)
+        self.server_state(server_id)
             .map(|s| s.nick.as_str())
             .unwrap_or(DEFAULT_GENERIC_NICK)
     }
@@ -986,6 +1001,11 @@ mod tests {
         assert_eq!(app.buffers[libera_rust].messages.len(), 1);
         assert_eq!(app.buffers[oftc_rust].messages.len(), 0);
         assert!(app.buffers[libera_rust].unread);
+
+        app.set_nick("LIBERA", "case_nick".into());
+        assert_eq!(app.nick_for("libera"), "case_nick");
+        assert_eq!(app.nick_for("LIBERA"), "case_nick");
+        assert_eq!(app.servers.len(), 2);
     }
 
     #[test]
