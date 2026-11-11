@@ -1271,6 +1271,14 @@ mod tests {
         );
 
         assert_eq!(app.nick_for("libera"), "irc_user_");
+
+        app.set_nick("libera", "bad!nick".into());
+        app.handle_nick_rejected("libera", false);
+        assert_eq!(app.nick_for("libera"), "bad!nick");
+
+        app.set_nick("libera", "sixteen_char_nic".into());
+        app.handle_nick_rejected("libera", false);
+        assert_eq!(app.nick_for("libera"), "sixteen_char_nic");
     }
 
     #[test]

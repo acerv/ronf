@@ -209,6 +209,23 @@ pub fn is_channel_name(name: &str) -> bool {
     name.starts_with(['#', '&'])
 }
 
+pub fn is_valid_nick(nick: &str) -> bool {
+    let mut bytes = nick.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    let is_special = |b: u8| {
+        matches!(
+            b,
+            b'_' | b'[' | b']' | b'{' | b'}' | b'\\' | b'|' | b'^' | b'`'
+        )
+    };
+    if !(first.is_ascii_alphabetic() || is_special(first)) {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || is_special(b) || b == b'-')
+}
+
 fn is_role_prefix(ch: char) -> bool {
     matches!(ch, '~' | '&' | '@' | '%' | '+')
 }

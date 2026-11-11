@@ -4,7 +4,9 @@ use irc::client::Sender;
 use irc::proto::{Command, Message, Prefix, Response};
 
 use crate::app::App;
-use crate::buffer::{contains_nick_mention, is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
+use crate::buffer::{
+    contains_nick_mention, is_channel_name, is_valid_nick, Buffer, BufferKind, ChatLine, LineKind,
+};
 
 #[derive(Debug)]
 pub enum ServerEvent {
@@ -119,9 +121,17 @@ impl App {
         }
 
         let current = self.nick_for(server_id).to_string();
-        let trailing_underscores = current.bytes().rev().take_while(|&b| b == b'_').count();
         let idx = self.find_server_buffer(server_id).unwrap_or(self.active_buffer);
-        if trailing_underscores >= 5 || current.len() >= 30 {
+        if !is_valid_nick(&current) {
+            self.push_error(
+                idx,
+                format!("! Nickname '{current}' is invalid; use /nick to choose a valid nickname"),
+            );
+            return;
+        }
+
+        let trailing_underscores = current.bytes().rev().take_while(|&b| b == b'_').count();
+        if trailing_underscores >= 5 || current.len() >= 16 {
             self.push_error(
                 idx,
                 format!("! Nickname '{current}' rejected; use /nick to choose another"),
@@ -496,6 +506,13 @@ impl App {
             }
             Response::RPL_LISTEND => {
                 self.push_system(srv_target, "* [list] End of /LIST");
+            }
+            Response::ERR_ERRONEOUSNICKNAME => {
+                let bad_nick = args.get(1).map(String::as_str).unwrap_or("");
+                self.push_error(
+                    srv_target,
+                    format!("! Erroneous nickname '{bad_nick}'; use /nick to choose a valid one"),
+                );
             }
             Response::ERR_NICKNAMEINUSE => {
                 let registered = args.first().is_some_and(|a| a != "*");
