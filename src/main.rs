@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
-use irc::client::prelude::{Client, Config as IrcConfig};
+use irc::client::prelude::{Capability, Client, Config as IrcConfig};
 use irc::error::Error as IrcError;
 use irc::proto::{Command, Response};
 use ratatui::DefaultTerminal;
@@ -168,6 +168,7 @@ async fn connect_and_stream(
         return SessionEnd::Shutdown;
     }
 
+    let _ = client.send_cap_req(&[Capability::MultiPrefix]);
     if let Err(err) = client.identify() {
         return SessionEnd::Retry(format!("Failed to identify: {err} (retrying in 5s)"));
     }
@@ -365,6 +366,12 @@ mod tests {
         let _ = srv_loop.await;
 
         let received = server_thread.join().unwrap();
+        assert!(
+            received
+                .iter()
+                .any(|l| l.contains("CAP REQ") && l.contains("multi-prefix")),
+            "Expected multi-prefix capability request in received lines: {received:?}"
+        );
         assert!(
             received.iter().any(|l| l.contains("QUIT :time to go")),
             "Expected QUIT message in received lines: {received:?}"
