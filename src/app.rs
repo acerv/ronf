@@ -36,6 +36,7 @@ pub struct App {
     pub log_dir: Option<PathBuf>,
     pub show_help: bool,
     pub help_scroll: usize,
+    pub term_width: u16,
     pub term_height: u16,
     pub should_quit: bool,
 }
@@ -105,9 +106,15 @@ impl App {
             log_dir,
             show_help: false,
             help_scroll: 0,
+            term_width: 80,
             term_height: 24,
             should_quit: false,
         }
+    }
+
+    pub fn set_terminal_size(&mut self, width: u16, height: u16) {
+        self.term_width = width;
+        self.set_terminal_height(height);
     }
 
     pub fn set_terminal_height(&mut self, height: u16) {
@@ -119,6 +126,21 @@ impl App {
     /// take the last two rows of the center column).
     pub fn chat_viewport_height(&self) -> usize {
         (self.term_height as usize).saturating_sub(2).max(1)
+    }
+
+    /// Width in columns of the padded chat area.
+    pub fn chat_viewport_width(&self) -> usize {
+        (self.term_width as usize)
+            .saturating_sub(24 + 20)
+            .saturating_sub(2)
+            .max(1)
+    }
+
+    pub fn active_max_scroll(&self) -> usize {
+        let viewport_rows = self.chat_viewport_height();
+        let width = self.chat_viewport_width();
+        let my_nick = self.active_nick();
+        crate::ui::compute_max_scroll(self.active_buf(), my_nick, width, viewport_rows)
     }
 
     fn server_state(&self, server_id: &str) -> Option<&ServerState> {
@@ -519,18 +541,17 @@ impl App {
             KeyCode::Backspace => self.input.backspace(),
             KeyCode::Delete => self.input.delete_forward(),
             KeyCode::PageUp => {
-                let viewport = self.chat_viewport_height();
                 let server_id = self.active_server_id();
                 let limit = self.history_limit_for(&server_id);
                 let log_dir = self.log_dir.clone();
                 let at_top = self.active_buf().scroll_offset.saturating_add(5)
-                    >= self.active_buf().max_scroll(viewport);
+                    >= self.active_max_scroll();
                 if at_top {
                     if let Some(ref dir) = log_dir {
                         load_more_buffer_history(dir, self.active_buf_mut(), limit);
                     }
                 }
-                let max_scroll = self.active_buf().max_scroll(viewport);
+                let max_scroll = self.active_max_scroll();
                 let buf = self.active_buf_mut();
                 buf.scroll_offset = buf.scroll_offset.saturating_add(5).min(max_scroll);
             }
@@ -1643,6 +1664,29 @@ mod tests {
         assert_eq!(app.buffers[rust_idx].scroll_offset, 1);
 
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn pageup_scrolls_when_wrapped_messages_exceed_viewport() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+        app.set_terminal_size(80, 10);
+
+        for _ in 0..3 {
+            app.handle_irc_message(
+                "libera",
+                Message {
+                    tags: None,
+                    prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                    command: Command::PRIVMSG("#rust".into(), "word ".repeat(40)),
+                },
+            );
+        }
+
+        assert!(app.active_max_scroll() > 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.buffers[rust_idx].scroll_offset > 0);
     }
 
     #[test]

@@ -10,7 +10,9 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::App;
-use crate::buffer::{contains_nick_mention, strip_user_prefix, BufferKind, ChatLine, LineKind};
+use crate::buffer::{
+    contains_nick_mention, strip_user_prefix, Buffer, BufferKind, ChatLine, LineKind,
+};
 use crate::command::COMMAND_SPECS;
 
 const NICK_PALETTE: &[Color] = &[
@@ -198,6 +200,29 @@ fn draw_tree_sidebar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
+pub fn compute_max_scroll(
+    buf: &Buffer,
+    my_nick: &str,
+    width: usize,
+    viewport_rows: usize,
+) -> usize {
+    if buf.messages.is_empty() {
+        return 0;
+    }
+    let target = viewport_rows.max(1);
+    let mut rows = 0usize;
+    let mut top_messages = 0usize;
+    for msg in &buf.messages {
+        let formatted = format_chat_line(msg, my_nick);
+        rows += wrapped_line_height(&formatted, width.max(1));
+        top_messages += 1;
+        if rows >= target {
+            break;
+        }
+    }
+    buf.messages.len().saturating_sub(top_messages)
+}
+
 fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     let buf = app.active_buf();
     let my_nick = app.active_nick();
@@ -212,7 +237,8 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     let inner_height = padded.height as usize;
     let width = padded.width.max(1) as usize;
     let total_msgs = buf.messages.len();
-    let scroll = buf.scroll_offset.min(buf.max_scroll(inner_height));
+    let max_scroll = compute_max_scroll(buf, my_nick, width, inner_height);
+    let scroll = buf.scroll_offset.min(max_scroll);
     let end = total_msgs.saturating_sub(scroll);
 
     let mut acc_rows = 0usize;
