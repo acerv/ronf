@@ -608,12 +608,16 @@ fn build_ctcp_reply(ctcp: &str) -> Option<String> {
 
 #[cfg(not(test))]
 fn send_desktop_notification(summary: &str, body: &str) {
-    let _ = notify_rust::Notification::new()
-        .appname("ronf")
-        .summary(summary)
-        .body(body)
-        .icon("user-available")
-        .show();
+    let summary = summary.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .appname("ronf")
+            .summary(&summary)
+            .body(&body)
+            .icon("user-available")
+            .show();
+    });
 }
 
 #[cfg(test)]
