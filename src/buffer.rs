@@ -206,7 +206,7 @@ impl Buffer {
 }
 
 pub fn is_channel_name(name: &str) -> bool {
-    name.starts_with(['#', '&'])
+    name.starts_with(['#', '&', '!', '+']) && name.len() > 1
 }
 
 pub fn is_valid_nick(nick: &str) -> bool {

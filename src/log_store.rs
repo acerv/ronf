@@ -9,10 +9,10 @@ use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
 
 fn sanitize_log_component(raw: &str, allow_chan_prefix: bool) -> String {
     let mut out = String::with_capacity(raw.len());
-    for &b in raw.as_bytes() {
+    for (idx, &b) in raw.as_bytes().iter().enumerate() {
         if b.is_ascii_alphanumeric()
             || matches!(b, b'-' | b'_')
-            || (allow_chan_prefix && matches!(b, b'#' | b'&'))
+            || (allow_chan_prefix && (matches!(b, b'#' | b'&') || (idx == 0 && matches!(b, b'!' | b'+'))))
         {
             out.push(b as char);
         } else {

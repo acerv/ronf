@@ -611,13 +611,19 @@ impl App {
                 self.show_help = true;
                 self.help_scroll = 0;
             }
-            UserCommand::Join(channel) => {
-                if !self.send_irc(&server_id, Command::JOIN(channel.clone(), None, None)) {
+            UserCommand::Join { channels, keys } => {
+                if !self.send_irc(&server_id, Command::JOIN(channels.clone(), keys, None)) {
                     return;
                 }
-                let idx = self.ensure_buffer(&server_id, &channel, BufferKind::Channel);
-                self.buffers[idx].parted = false;
-                self.select_buffer(idx);
+                let mut last_idx = None;
+                for chan in channels.split(',').filter(|c| !c.is_empty()) {
+                    let idx = self.ensure_buffer(&server_id, chan, BufferKind::Channel);
+                    self.buffers[idx].parted = false;
+                    last_idx = Some(idx);
+                }
+                if let Some(idx) = last_idx {
+                    self.select_buffer(idx);
+                }
             }
             UserCommand::Part(reason) => {
                 let Some(chan) = self.require_active_channel("Cannot /part a non-channel buffer")

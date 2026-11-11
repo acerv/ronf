@@ -16,7 +16,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["/join"],
-        usage: "/join <#chan>",
+        usage: "/join <#chan> [key]",
         description: "Join channel on active server",
     },
     CommandSpec {
@@ -153,7 +153,10 @@ pub fn slash_command_names() -> impl Iterator<Item = &'static str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserCommand {
     Help,
-    Join(String),
+    Join {
+        channels: String,
+        keys: Option<String>,
+    },
     Part(Option<String>),
     Msg { target: String, text: String },
     Query { target: String, text: Option<String> },
@@ -219,13 +222,26 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
     match cmd.as_str() {
         "/help" | "/h" | "/?" => Some(UserCommand::Help),
         "/join" | "/j" => {
-            let chan = first_word(rest)?;
-            let normalized = if is_channel_name(chan) {
-                chan.to_string()
-            } else {
-                format!("#{chan}")
-            };
-            Some(UserCommand::Join(normalized))
+            let (raw_chans, keys) = split_first_arg(rest)?;
+            let channels: Vec<String> = raw_chans
+                .split(',')
+                .filter(|c| !c.is_empty())
+                .map(|chan| {
+                    if is_channel_name(chan) {
+                        chan.to_string()
+                    } else {
+                        format!("#{chan}")
+                    }
+                })
+                .collect();
+            if channels.is_empty() {
+                return None;
+            }
+            let keys = keys.and_then(|k| first_word(&k).map(str::to_string));
+            Some(UserCommand::Join {
+                channels: channels.join(","),
+                keys,
+            })
         }
         "/part" | "/leave" => Some(UserCommand::Part(non_empty(rest))),
         "/msg" => {
@@ -259,7 +275,13 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 })
             } else {
                 let (first, rem) = split_first_arg(rest)?;
-                if is_channel_name(&first) {
+                if first.starts_with(['+', '-']) && rem.is_none() {
+                    Some(UserCommand::Mode {
+                        target: None,
+                        args: rest.to_string(),
+                        channel_only: false,
+                    })
+                } else if is_channel_name(&first) {
                     Some(UserCommand::Mode {
                         target: Some(first),
                         args: rem.unwrap_or_default(),
@@ -415,7 +437,24 @@ mod tests {
         );
         assert_eq!(
             parse_user_command("/join #rust"),
-            Some(UserCommand::Join("#rust".to_string()))
+            Some(UserCommand::Join {
+                channels: "#rust".to_string(),
+                keys: None,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/join #secret mykey"),
+            Some(UserCommand::Join {
+                channels: "#secret".to_string(),
+                keys: Some("mykey".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_user_command("/join +modeless,!safe"),
+            Some(UserCommand::Join {
+                channels: "+modeless,!safe".to_string(),
+                keys: None,
+            })
         );
         assert_eq!(
             parse_user_command("/msg alice hello there"),
