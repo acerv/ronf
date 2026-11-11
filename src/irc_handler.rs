@@ -326,8 +326,12 @@ impl App {
                 if let Some(nick) = sender_nick {
                     let should_show = self.should_show_join_part(server_id);
                     let suffix = format_reason(reason);
-                    let affected =
-                        self.affected_server_buffers(server_id, |buf| buf.remove_user(&nick));
+                    let affected = self.affected_server_buffers(server_id, |buf| {
+                        let removed = buf.remove_user(&nick);
+                        let is_dm = buf.kind == BufferKind::DirectMessage
+                            && buf.name.eq_ignore_ascii_case(&nick);
+                        removed || is_dm
+                    });
                     if should_show {
                         for idx in affected {
                             self.push_system(idx, format!("<-- {nick} has quit{suffix}"));
@@ -341,8 +345,24 @@ impl App {
                     if is_self {
                         self.set_nick(server_id, new_nick.clone());
                     }
+                    let new_dm_exists = self.buffers.iter().any(|b| {
+                        b.kind == BufferKind::DirectMessage
+                            && b.server_id.eq_ignore_ascii_case(server_id)
+                            && b.name.eq_ignore_ascii_case(&new_nick)
+                    });
                     let affected = self.affected_server_buffers(server_id, |buf| {
-                        buf.rename_user(&old_nick, &new_nick)
+                        let renamed_in_chan = buf.rename_user(&old_nick, &new_nick);
+                        let renamed_dm = if buf.kind == BufferKind::DirectMessage
+                            && buf.name.eq_ignore_ascii_case(&old_nick)
+                        {
+                            if !new_dm_exists || old_nick.eq_ignore_ascii_case(&new_nick) {
+                                buf.name = new_nick.clone();
+                            }
+                            true
+                        } else {
+                            false
+                        };
+                        renamed_in_chan || renamed_dm
                     });
                     if is_self && affected.is_empty() {
                         let idx = self.target_buffer_for_server(server_id);

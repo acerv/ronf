@@ -1279,6 +1279,24 @@ mod tests {
         let dm_idx = app.find_buffer("libera", "bob").unwrap();
         assert_eq!(app.buffers[dm_idx].kind, BufferKind::DirectMessage);
         assert!(app.buffers[dm_idx].highlight);
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("bob".into(), "b".into(), "h".into())),
+                command: Command::NICK("bob_away".into()),
+            },
+        );
+        assert!(app.find_buffer("libera", "bob").is_none());
+        let renamed_dm = app.find_buffer("libera", "bob_away").unwrap();
+        assert_eq!(renamed_dm, dm_idx);
+        assert!(app.buffers[renamed_dm]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("bob is now known as bob_away"));
     }
 
     #[test]
