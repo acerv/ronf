@@ -420,24 +420,48 @@ impl App {
         server_id: &str,
         buf_idx: usize,
         target: &str,
-        wire_override: Option<&str>,
         display_text: String,
         kind: LineKind,
     ) -> bool {
-        let wire = wire_override.unwrap_or(&display_text);
-        if let Some(sender) = self.sender_for(server_id) {
-            if sender.send_privmsg(target, wire).is_ok() {
-                let nick = self.nick_for(server_id).to_string();
-                self.push_to_buffer(buf_idx, ChatLine::new(Some(nick), display_text, kind));
-                return true;
-            }
-            self.set_sender(server_id, None);
+        let (prefix, suffix) = if kind == LineKind::Action {
+            ("\x01ACTION ", "\x01")
+        } else {
+            ("", "")
+        };
+        // Include the trailing-parameter colon, CRLF, and each action's envelope.
+        let overhead = "PRIVMSG  :\r\n".len() + target.len() + prefix.len() + suffix.len();
+        let limit = 512usize.saturating_sub(overhead);
+        if limit == 0 || display_text.chars().any(|ch| ch.len_utf8() > limit) {
+            self.push_error(self.active_buffer, "Target is too long to send this message");
+            return false;
         }
-        self.push_error(
-            self.active_buffer,
-            format!("Not connected to [{server_id}]; message not sent"),
-        );
-        false
+
+        let mut remaining = display_text.as_str();
+        loop {
+            let mut end = remaining.len().min(limit);
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            let part = &remaining[..end];
+            let wire = format!("{prefix}{part}{suffix}");
+            if let Some(sender) = self.sender_for(server_id) {
+                if sender.send_privmsg(target, wire).is_ok() {
+                    let nick = self.nick_for(server_id).to_string();
+                    self.push_to_buffer(buf_idx, ChatLine::new(Some(nick), part, kind));
+                    remaining = &remaining[end..];
+                    if remaining.is_empty() {
+                        return true;
+                    }
+                    continue;
+                }
+                self.set_sender(server_id, None);
+            }
+            self.push_error(
+                self.active_buffer,
+                format!("Not connected to [{server_id}]; message not fully sent"),
+            );
+            return false;
+        }
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
@@ -675,7 +699,6 @@ impl App {
                     &server_id,
                     idx,
                     &target,
-                    None,
                     text,
                     LineKind::Normal,
                 ) {
@@ -694,7 +717,6 @@ impl App {
                         &server_id,
                         idx,
                         &target,
-                        None,
                         msg_text,
                         LineKind::Normal,
                     ) {
@@ -711,12 +733,10 @@ impl App {
                 else {
                     return;
                 };
-                let ctcp = format!("\x01ACTION {action}\x01");
                 self.send_privmsg_and_echo(
                     &server_id,
                     self.active_buffer,
                     &target,
-                    Some(&ctcp),
                     action,
                     LineKind::Action,
                 );
@@ -982,7 +1002,6 @@ impl App {
                     &server_id,
                     self.active_buffer,
                     &target,
-                    None,
                     text,
                     LineKind::Normal,
                 );
@@ -1024,6 +1043,121 @@ mod tests {
         "##;
         let cfg = AppConfig::from_toml_str(toml).unwrap();
         App::from_config(&cfg)
+    }
+
+    async fn capture_outgoing(action: impl FnOnce(&mut App)) -> (App, Vec<Message>) {
+        use futures::StreamExt;
+        use std::io::{BufRead, BufReader};
+        use std::time::Duration;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reader = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut messages = Vec::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                assert!(line.len() <= 512, "Oversized IRC line: {} bytes", line.len());
+                let message: Message = line.parse().unwrap();
+                if matches!(message.command, Command::PING(_, _)) {
+                    return messages;
+                }
+                messages.push(message);
+            }
+        });
+        let mut client = irc::client::Client::from_config(irc::client::data::Config {
+            nickname: Some("irc_user".into()),
+            server: Some("127.0.0.1".into()),
+            port: Some(port),
+            use_tls: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut app = test_app();
+        app.set_sender("libera", Some(client.sender()));
+        action(&mut app);
+        client.sender()
+            .send(Command::PING("test-end".into(), None))
+            .unwrap();
+        let mut stream = client.stream().unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        (app, reader.join().unwrap())
+    }
+
+    #[tokio::test]
+    async fn splits_long_messages_and_actions_at_utf8_boundaries() {
+        for kind in [LineKind::Normal, LineKind::Action] {
+            for text in [
+                "short text".to_string(),
+                format!("{} b", "a".repeat(493)),
+                "x".repeat(600),
+                "hello ".repeat(100),
+                format!("{}{}", "x".repeat(493), "🦀".repeat(80)),
+            ] {
+                let (app, messages) = capture_outgoing(|app| {
+                    let idx = app.find_buffer("libera", "#rust").unwrap();
+                    app.select_buffer(idx);
+                    app.execute_user_command(if kind == LineKind::Action {
+                        UserCommand::Me(text.clone())
+                    } else {
+                        UserCommand::Say(text.clone())
+                    });
+                })
+                .await;
+                if text.len() > 495 || (kind == LineKind::Action && text.len() > 486) {
+                    assert!(messages.len() > 1);
+                } else {
+                    assert_eq!(messages.len(), 1);
+                }
+                let parts: Vec<_> = messages
+                    .iter()
+                    .map(|message| {
+                        let Command::PRIVMSG(target, body) = &message.command else {
+                            panic!("Unexpected message: {message:?}");
+                        };
+                        assert_eq!(target, "#rust");
+                        if kind == LineKind::Action {
+                            body.strip_prefix("\x01ACTION ")
+                                .unwrap()
+                                .strip_suffix('\x01')
+                                .unwrap()
+                        } else {
+                            body.as_str()
+                        }
+                    })
+                    .collect();
+                assert_eq!(parts.concat(), text);
+                let idx = app.find_buffer("libera", "#rust").unwrap();
+                let echoed = &app.buffers[idx].messages;
+                assert_eq!(echoed.len(), parts.len());
+                for (line, part) in echoed.iter().zip(parts) {
+                    assert_eq!(line.kind, kind);
+                    assert_eq!(line.content, part);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_targets_without_room_for_message_text() {
+        for target in ["a".repeat(500), "a".repeat(499)] {
+            let (app, messages) = capture_outgoing(|app| {
+                app.execute_user_command(UserCommand::Msg {
+                    target: target.clone(),
+                    text: "🦀".into(),
+                });
+            })
+            .await;
+            assert!(messages.is_empty());
+            assert!(app.sender_for("libera").is_some());
+            assert_eq!(app.active_buf().messages.last().unwrap().kind, LineKind::Error);
+            let idx = app.find_buffer("libera", &target).unwrap();
+            assert!(app.buffers[idx].messages.is_empty());
+        }
     }
 
     #[test]
