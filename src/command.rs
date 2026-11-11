@@ -46,8 +46,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["/topic"],
-        usage: "/topic [text]",
-        description: "View or set channel topic",
+        usage: "/topic [text|-clear]",
+        description: "View, set, or clear topic",
     },
     CommandSpec {
         names: &["/whois"],
@@ -256,7 +256,13 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
         }
         "/nick" => Some(UserCommand::Nick(first_word(rest)?.to_string())),
         "/me" => non_empty(rest).map(UserCommand::Me),
-        "/topic" => Some(UserCommand::Topic(non_empty(rest))),
+        "/topic" => {
+            if matches!(rest, "-clear" | "--clear" | "\"\"" | "''" | ":") {
+                Some(UserCommand::Topic(Some(String::new())))
+            } else {
+                Some(UserCommand::Topic(non_empty(rest)))
+            }
+        }
         "/whois" => Some(UserCommand::Whois(first_word(rest)?.to_string())),
         "/kick" => {
             let (nick, reason) = split_first_arg(rest)?;
@@ -431,6 +437,14 @@ mod tests {
             Some(UserCommand::Whois("alice".to_string()))
         );
         assert_eq!(parse_user_command("/topic"), Some(UserCommand::Topic(None)));
+        assert_eq!(
+            parse_user_command("/topic -clear"),
+            Some(UserCommand::Topic(Some(String::new())))
+        );
+        assert_eq!(
+            parse_user_command("/topic \"\""),
+            Some(UserCommand::Topic(Some(String::new())))
+        );
         assert_eq!(
             parse_user_command("/topic Rust 2024 edition"),
             Some(UserCommand::Topic(Some("Rust 2024 edition".to_string())))

@@ -57,7 +57,13 @@ impl App {
             self.target_buffer_for_server(server_id)
         };
         match topic {
-            Some(t) => self.push_system(idx, format!("* Topic for {chan}: {t}")),
+            Some(t) if !t.is_empty() => self.push_system(idx, format!("* Topic for {chan}: {t}")),
+            Some(_) => {
+                if let Some(chan_idx) = self.find_buffer(server_id, chan) {
+                    self.buffers[chan_idx].topic = None;
+                }
+                self.push_system(idx, format!("* Topic for {chan} was cleared"));
+            }
             None if announce_empty => {
                 self.push_system(idx, format!("* No topic is set for {chan}"))
             }

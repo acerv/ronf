@@ -706,17 +706,19 @@ impl App {
                 else {
                     return;
                 };
-                if new_topic.is_none() {
+                if new_topic.is_none() && self.sender_for(&server_id).is_none() {
                     if let Some(existing) = self.active_buf().topic.clone() {
                         self.push_system(
                             self.active_buffer,
                             format!("* Topic for {chan}: {existing}"),
                         );
-                        if let Some(sender) = self.sender_for(&server_id) {
-                            let _ = sender.send(Command::TOPIC(chan, None));
-                        }
-                        return;
+                    } else {
+                        self.push_system(
+                            self.active_buffer,
+                            format!("* No topic is set for {chan}"),
+                        );
                     }
+                    return;
                 }
                 self.send_irc(&server_id, Command::TOPIC(chan, new_topic));
             }
