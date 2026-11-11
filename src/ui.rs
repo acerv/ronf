@@ -240,67 +240,79 @@ pub fn wrapped_line_height(line: &Line, width: usize) -> usize {
     if width == 0 {
         return 1;
     }
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    if text.is_empty() {
+
+    let mut wrapped_lines = 0usize;
+    let mut line_width = 0usize;
+    let mut word_width = 0usize;
+    let mut whitespace_width = 0usize;
+    let mut pending_ws: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut non_whitespace_previous = false;
+    let mut has_any = false;
+
+    for grapheme in line.styled_graphemes(Style::default()) {
+        has_any = true;
+        let symbol = grapheme.symbol;
+        let is_whitespace =
+            symbol == "\u{200b}" || (symbol.chars().all(char::is_whitespace) && symbol != "\u{00a0}");
+        let symbol_width = UnicodeWidthStr::width(symbol);
+
+        if symbol_width > width {
+            continue;
+        }
+
+        let word_found = non_whitespace_previous && is_whitespace;
+        let untrimmed_overflow = line_width == 0
+            && word_width + whitespace_width + symbol_width > width;
+
+        if word_found || untrimmed_overflow {
+            line_width += whitespace_width + word_width;
+            pending_ws.clear();
+            whitespace_width = 0;
+            word_width = 0;
+        }
+
+        let line_full = line_width >= width;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= width;
+
+        if line_full || pending_word_overflow {
+            let mut remaining_width = width.saturating_sub(line_width);
+            wrapped_lines += 1;
+            line_width = 0;
+
+            while let Some(&ws_w) = pending_ws.front() {
+                if ws_w > remaining_width {
+                    break;
+                }
+                whitespace_width -= ws_w;
+                remaining_width -= ws_w;
+                pending_ws.pop_front();
+            }
+
+            if is_whitespace && pending_ws.is_empty() {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width += symbol_width;
+            pending_ws.push_back(symbol_width);
+        } else {
+            word_width += symbol_width;
+        }
+
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    if !has_any {
         return 1;
     }
 
-    let mut rows = 1usize;
-    let mut col = 0usize;
-    let mut chars = text.chars().peekable();
-
-    while let Some(&ch) = chars.peek() {
-        let is_ws = ch.is_whitespace();
-        let mut seg_len = 0usize;
-        while let Some(&c) = chars.peek() {
-            if c.is_whitespace() == is_ws {
-                seg_len += char_display_width(c);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-
-        if is_ws {
-            if col + seg_len <= width {
-                col += seg_len;
-            } else {
-                let rem = (col + seg_len) - width;
-                rows += 1 + rem / width;
-                col = rem % width;
-            }
-        } else if col > 0 && col + seg_len <= width {
-            col += seg_len;
-        } else {
-            if col > 0 {
-                rows += 1;
-            }
-            rows += (seg_len.saturating_sub(1)) / width;
-            col = if seg_len == 0 {
-                0
-            } else {
-                (seg_len - 1) % width + 1
-            };
-        }
+    if line_width > 0 || word_width > 0 || whitespace_width > 0 || !pending_ws.is_empty() {
+        wrapped_lines += 1;
     }
 
-    rows
-}
-
-fn char_display_width(c: char) -> usize {
-    let u = c as u32;
-    if (0x1100..=0x115F).contains(&u)
-        || (0x2E80..=0xA4CF).contains(&u)
-        || (0xAC00..=0xD7A3).contains(&u)
-        || (0xF900..=0xFAFF).contains(&u)
-        || (0xFE10..=0xFE6F).contains(&u)
-        || (0xFF00..=0xFF60).contains(&u)
-        || (0x1F300..=0x1FAFF).contains(&u)
-    {
-        2
-    } else {
-        1
-    }
+    wrapped_lines.max(1)
 }
 
 fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
@@ -827,6 +839,12 @@ mod tests {
 
         let word_wrapped = Line::from("aaaaa bbbbb ccccc");
         assert_eq!(wrapped_line_height(&word_wrapped, 10), 3);
+
+        let combining = Line::from("e\u{0301}".repeat(10));
+        assert_eq!(wrapped_line_height(&combining, 10), 1);
+
+        let cjk = Line::from("你好世界你好");
+        assert_eq!(wrapped_line_height(&cjk, 10), 2);
     }
 
     #[test]
