@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
 
@@ -101,29 +102,55 @@ fn sanitize_single_line(s: &str) -> String {
         .collect()
 }
 
-pub(crate) fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
-    let path = buffer_log_path(base_dir, server_id, buf_name);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let clean_content = sanitize_single_line(&line.content);
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        match (&line.kind, &line.sender) {
-            (LineKind::Action, Some(sender)) => {
-                if clean_content.is_empty() {
-                    let _ = writeln!(file, "[{}] * {}", line.timestamp, sender);
-                } else {
-                    let _ = writeln!(file, "[{}] * {} {}", line.timestamp, sender, clean_content);
-                }
-            }
-            (_, Some(sender)) => {
-                let _ = writeln!(file, "[{}] <{}> {}", line.timestamp, sender, clean_content);
-            }
-            (_, None) => {
-                let _ = writeln!(file, "[{}] {}", line.timestamp, clean_content);
-            }
+fn log_file_cache() -> &'static Mutex<BTreeMap<PathBuf, File>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, File>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+const MAX_CACHED_LOG_FILES: usize = 64;
+
+fn write_log_entry(path: PathBuf, entry: &str) {
+    let mut cache = match log_file_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !cache.contains_key(&path) {
+        if cache.len() >= MAX_CACHED_LOG_FILES {
+            cache.clear();
+        }
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
+            cache.insert(path.clone(), file);
         }
     }
+    if let Some(file) = cache.get_mut(&path) {
+        if file.write_all(entry.as_bytes()).is_err() {
+            cache.remove(&path);
+        }
+    }
+}
+
+pub(crate) fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str, line: &ChatLine) {
+    let path = buffer_log_path(base_dir, server_id, buf_name);
+    let clean_content = sanitize_single_line(&line.content);
+    let formatted = match (&line.kind, &line.sender) {
+        (LineKind::Action, Some(sender)) => {
+            if clean_content.is_empty() {
+                format!("[{}] * {}\n", line.timestamp, sender)
+            } else {
+                format!("[{}] * {} {}\n", line.timestamp, sender, clean_content)
+            }
+        }
+        (_, Some(sender)) => {
+            format!("[{}] <{}> {}\n", line.timestamp, sender, clean_content)
+        }
+        (_, None) => {
+            format!("[{}] {}\n", line.timestamp, clean_content)
+        }
+    };
+    write_log_entry(path, &formatted);
 }
 
 fn parse_log_line(raw: &str) -> Option<ChatLine> {
