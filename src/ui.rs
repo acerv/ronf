@@ -673,14 +673,19 @@ pub fn parse_irc_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
 
     while i < bytes.len() {
         match bytes[i] {
-            0x02 | 0x1d | 0x1f => {
+            0x02 | 0x16 | 0x1d | 0x1e | 0x1f => {
                 flush(&mut spans, &mut current_text, current_style);
                 let modifier = match bytes[i] {
                     0x02 => Modifier::BOLD,
+                    0x16 => Modifier::REVERSED,
                     0x1d => Modifier::ITALIC,
+                    0x1e => Modifier::CROSSED_OUT,
                     _ => Modifier::UNDERLINED,
                 };
                 current_style = toggle_modifier(current_style, modifier);
+                i += 1;
+            }
+            0x11 => {
                 i += 1;
             }
             0x0f => {
@@ -693,17 +698,29 @@ pub fn parse_irc_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
                 i += 1;
                 let (fg_code, consumed_fg) = parse_two_digit_color(&bytes[i..]);
                 i += consumed_fg;
-                if let Some(fg) = fg_code {
-                    if let Some(c) = mirc_color_to_ratatui(fg) {
-                        current_style = current_style.fg(c);
+                let mut consumed_bg = 0usize;
+                let mut bg_code = None;
+                if i < bytes.len() && bytes[i] == b',' {
+                    let (parsed_bg, len_bg) = parse_two_digit_color(&bytes[i + 1..]);
+                    if len_bg > 0 {
+                        consumed_bg = len_bg;
+                        bg_code = parsed_bg;
+                        i += 1 + len_bg;
                     }
-                    if i < bytes.len() && bytes[i] == b',' {
-                        let (bg_code, consumed_bg) = parse_two_digit_color(&bytes[i + 1..]);
-                        if consumed_bg > 0 {
-                            i += 1 + consumed_bg;
-                            if let Some(bg) = bg_code.and_then(mirc_color_to_ratatui) {
-                                current_style = current_style.bg(bg);
-                            }
+                }
+                if consumed_fg > 0 || consumed_bg > 0 {
+                    if let Some(fg) = fg_code {
+                        if fg == 99 {
+                            current_style.fg = base_style.fg;
+                        } else if let Some(c) = mirc_color_to_ratatui(fg) {
+                            current_style = current_style.fg(c);
+                        }
+                    }
+                    if let Some(bg) = bg_code {
+                        if bg == 99 {
+                            current_style.bg = base_style.bg;
+                        } else if let Some(c) = mirc_color_to_ratatui(bg) {
+                            current_style = current_style.bg(c);
                         }
                     }
                 } else {
@@ -767,7 +784,13 @@ const MIRC_COLORS: [Color; 16] = [
 ];
 
 fn mirc_color_to_ratatui(code: u8) -> Option<Color> {
-    MIRC_COLORS.get(code as usize).copied()
+    if let Some(&c) = MIRC_COLORS.get(code as usize) {
+        Some(c)
+    } else if (16..=98).contains(&code) {
+        Some(Color::Indexed(code))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -899,6 +922,15 @@ mod tests {
 
         assert_eq!(spans[3].content, " plain");
         assert_eq!(spans[3].style, base);
+
+        let bg_and_99 = parse_irc_spans("\x0304,02colored\x03,99bg_reset\x16rev\x1estrike", base);
+        assert_eq!(bg_and_99[0].style.fg, Some(Color::LightRed));
+        assert_eq!(bg_and_99[0].style.bg, Some(Color::Blue));
+        assert_eq!(bg_and_99[1].content, "bg_reset");
+        assert_eq!(bg_and_99[1].style.fg, Some(Color::LightRed));
+        assert_eq!(bg_and_99[1].style.bg, None);
+        assert!(bg_and_99[2].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(bg_and_99[3].style.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 
     #[test]
