@@ -281,47 +281,53 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 })
             } else {
                 let (first, rem) = split_first_arg(rest)?;
-                if first.starts_with(['+', '-']) && rem.is_none() {
-                    Some(UserCommand::Mode {
-                        target: None,
-                        args: rest.to_string(),
-                        channel_only: false,
-                    })
-                } else if is_channel_name(&first) {
+                if first.starts_with(['#', '&', '!']) {
                     Some(UserCommand::Mode {
                         target: Some(first),
                         args: rem.unwrap_or_default(),
                         channel_only: false,
                     })
-                } else if !first.starts_with(['+', '-'])
-                    && rem.as_deref().map_or(false, |r| r.starts_with(['+', '-']))
+                } else if first.starts_with(['+', '-'])
+                    && rem.as_deref().is_some_and(|r| r.starts_with(['+', '-']))
                 {
                     Some(UserCommand::Mode {
                         target: Some(first),
                         args: rem.unwrap_or_default(),
                         channel_only: false,
                     })
-                } else {
+                } else if first.starts_with(['+', '-']) {
                     Some(UserCommand::Mode {
                         target: None,
                         args: rest.to_string(),
+                        channel_only: false,
+                    })
+                } else {
+                    Some(UserCommand::Mode {
+                        target: Some(first),
+                        args: rem.unwrap_or_default(),
                         channel_only: false,
                     })
                 }
             }
         }
         "/ban" | "/op" | "/deop" | "/voice" | "/devoice" => {
-            let arg = first_word(rest)?;
-            let flag = match cmd.as_str() {
-                "/ban" => "+b",
-                "/op" => "+o",
-                "/deop" => "-o",
-                "/voice" => "+v",
-                _ => "-v",
+            let targets: Vec<&str> = rest.split_whitespace().collect();
+            if targets.is_empty() {
+                return None;
+            }
+            let (sign, letter) = match cmd.as_str() {
+                "/ban" => ('+', 'b'),
+                "/op" => ('+', 'o'),
+                "/deop" => ('-', 'o'),
+                "/voice" => ('+', 'v'),
+                _ => ('-', 'v'),
             };
+            let flags: String = std::iter::once(sign)
+                .chain(std::iter::repeat_n(letter, targets.len()))
+                .collect();
             Some(UserCommand::Mode {
                 target: None,
-                args: format!("{flag} {arg}"),
+                args: format!("{flags} {}", targets.join(" ")),
                 channel_only: true,
             })
         }
@@ -370,6 +376,14 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_user_command("/mode mynick"),
+            Some(UserCommand::Mode {
+                target: Some("mynick".to_string()),
+                args: String::new(),
+                channel_only: false,
+            })
+        );
+        assert_eq!(
             parse_user_command("/mode mynick +i"),
             Some(UserCommand::Mode {
                 target: Some("mynick".to_string()),
@@ -398,6 +412,14 @@ mod tests {
             Some(UserCommand::Mode {
                 target: None,
                 args: "+o alice".to_string(),
+                channel_only: true,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/op alice bob"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: "+oo alice bob".to_string(),
                 channel_only: true,
             })
         );
