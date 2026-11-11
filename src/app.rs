@@ -1794,6 +1794,30 @@ mod tests {
         );
 
         assert!(app.find_buffer("libera", "#unjoined").is_none());
+
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("ChanServ".into(), "c".into(), "h".into())),
+                command: Command::NOTICE("#unjoined".into(), "You are not opped".into()),
+            },
+        );
+        assert!(app.find_buffer("libera", "#unjoined").is_none());
+
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("alice".into(), "a".into(), "h".into())),
+                command: Command::NOTICE("@#rust".into(), "ops notice".into()),
+            },
+        );
+        assert_eq!(
+            app.buffers[rust_idx].messages.last().unwrap().content,
+            "-alice- ops notice"
+        );
     }
 
     #[test]

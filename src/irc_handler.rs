@@ -5,7 +5,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 
 use crate::app::App;
 use crate::buffer::{
-    contains_nick_mention, is_channel_name, is_valid_nick, Buffer, BufferKind, ChatLine, LineKind,
+    contains_nick_mention, extract_user_prefixes, is_channel_name, is_valid_nick, Buffer,
+    BufferKind, ChatLine, LineKind,
 };
 
 #[derive(Debug)]
@@ -165,7 +166,13 @@ impl App {
 
         match msg.command {
             Command::PRIVMSG(_, _) | Command::NOTICE(_, _) if is_ignored => {}
-            Command::PRIVMSG(target, text) => {
+            Command::PRIVMSG(raw_target, text) => {
+                let (_, stripped_target) = extract_user_prefixes(&raw_target);
+                let target = if is_channel_name(stripped_target) {
+                    stripped_target.to_string()
+                } else {
+                    raw_target
+                };
                 let is_channel = is_channel_name(&target);
                 let ctcp_action = match parse_ctcp(&text) {
                     Some(CtcpPayload::Action(act)) => Some(act.to_string()),
@@ -251,10 +258,24 @@ impl App {
                     self.push_system(idx, format!("* [ctcp] {from} reply: {ctcp}"));
                     return;
                 }
-                let idx = if is_channel_name(&target) {
-                    self.ensure_buffer(server_id, &target, BufferKind::Channel)
+                let (_, stripped_target) = extract_user_prefixes(&target);
+                let chan_target = if is_channel_name(stripped_target) {
+                    Some(stripped_target)
+                } else if is_channel_name(&target) {
+                    Some(target.as_str())
                 } else {
-                    self.find_server_buffer(server_id).unwrap_or(0)
+                    None
+                };
+                let idx = if let Some(chan) = chan_target {
+                    self.find_buffer(server_id, chan)
+                        .unwrap_or_else(|| self.target_buffer_for_server(server_id))
+                } else if let Some(ref nick) = sender_nick {
+                    self.find_buffer(server_id, nick)
+                        .or_else(|| self.find_server_buffer(server_id))
+                        .unwrap_or(self.active_buffer)
+                } else {
+                    self.find_server_buffer(server_id)
+                        .unwrap_or(self.active_buffer)
                 };
                 let prefix = sender_nick.map(|n| format!("-{n}- {text}")).unwrap_or(text);
                 self.push_system(idx, prefix);
