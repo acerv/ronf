@@ -838,11 +838,28 @@ impl App {
                         return;
                     }
                 }
-                if let Some(idx) = self
+                if let Some((srv_part, buf_part)) = target.split_once('/') {
+                    if let Some(idx) = self.buffers.iter().position(|b| {
+                        b.server_id.eq_ignore_ascii_case(srv_part)
+                            && b.name.eq_ignore_ascii_case(buf_part)
+                    }) {
+                        self.select_buffer(idx);
+                        return;
+                    }
+                }
+                let matched_idx = self
                     .buffers
                     .iter()
-                    .position(|b| b.name.eq_ignore_ascii_case(&target))
-                {
+                    .position(|b| {
+                        b.server_id.eq_ignore_ascii_case(&server_id)
+                            && b.name.eq_ignore_ascii_case(&target)
+                    })
+                    .or_else(|| {
+                        self.buffers
+                            .iter()
+                            .position(|b| b.name.eq_ignore_ascii_case(&target))
+                    });
+                if let Some(idx) = matched_idx {
                     self.select_buffer(idx);
                 } else {
                     self.push_error(self.active_buffer, format!("Buffer not found: {target}"));
@@ -1035,6 +1052,14 @@ mod tests {
         assert_eq!(app.nick_for("libera"), "case_nick");
         assert_eq!(app.nick_for("LIBERA"), "case_nick");
         assert_eq!(app.servers.len(), 2);
+
+        let oftc_srv = app.find_server_buffer("oftc").unwrap();
+        app.select_buffer(oftc_srv);
+        app.execute_user_command(UserCommand::Buffer("#rust".into()));
+        assert_eq!(app.active_buffer, oftc_rust);
+
+        app.execute_user_command(UserCommand::Buffer("libera/#rust".into()));
+        assert_eq!(app.active_buffer, libera_rust);
     }
 
     #[test]
