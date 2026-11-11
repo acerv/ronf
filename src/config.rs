@@ -152,7 +152,6 @@ fn run_secret_command(cmd: &str) -> Result<String> {
         .lines()
         .next()
         .unwrap_or("")
-        .trim()
         .to_string();
 
     if secret.is_empty() {
@@ -353,6 +352,9 @@ mod tests {
         assert_eq!(irc_cfg.password.as_deref(), Some("my_secret_pw"));
         assert_eq!(irc_cfg.nick_password.as_deref(), Some("nickserv_pw"));
         assert_eq!(irc_cfg.client_cert_path.as_deref(), Some("/tmp/client.pem"));
+
+        let spaced_pw = run_secret_command("printf '  spaced pw  \\n'").unwrap();
+        assert_eq!(spaced_pw, "  spaced pw  ");
     }
 
     #[test]
