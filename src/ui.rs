@@ -223,16 +223,22 @@ pub fn compute_max_scroll(
     buf.messages.len().saturating_sub(top_messages)
 }
 
+fn horizontal_pad(area: Rect) -> Rect {
+    if area.width > 2 {
+        Rect::new(area.x + 1, area.y, area.width - 2, area.height)
+    } else {
+        area
+    }
+}
+
 fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let buf = app.active_buf();
     let my_nick = app.active_nick();
 
-    let padded = Rect::new(
-        area.x.saturating_add(1),
-        area.y,
-        area.width.saturating_sub(2),
-        area.height,
-    );
+    let padded = horizontal_pad(area);
 
     let inner_height = padded.height as usize;
     let width = padded.width.max(1) as usize;
@@ -614,6 +620,9 @@ pub fn help_max_scroll(area_height: u16) -> usize {
 
 fn draw_help_popup(f: &mut Frame, app: &App) {
     let area = f.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let (lines, content_width) = cached_help();
 
     let title = " Help — q/Esc to close, j/k to scroll ";
@@ -634,12 +643,10 @@ fn draw_help_popup(f: &mut Frame, app: &App) {
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
-    let padded = Rect::new(
-        inner.x + 1,
-        inner.y,
-        inner.width.saturating_sub(2),
-        inner.height,
-    );
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let padded = horizontal_pad(inner);
 
     let max_scroll = help_max_scroll(area.height);
     let scroll = app.help_scroll.min(max_scroll) as u16;
@@ -915,6 +922,29 @@ mod tests {
             if line.spans.len() == 2 {
                 assert!(line.spans[0].content.ends_with("   ") || line.spans[0].content.ends_with("  "));
             }
+        }
+    }
+
+    #[test]
+    fn draws_safely_on_tiny_terminal_dimensions() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let toml = r##"
+            default_nickname = "irc_user"
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##;
+        let cfg = AppConfig::from_toml_str(toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        app.show_help = true;
+
+        for (w, h) in [(1, 1), (2, 2), (10, 3), (44, 5)] {
+            app.set_terminal_size(w, h);
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
         }
     }
 }
