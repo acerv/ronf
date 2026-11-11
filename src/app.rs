@@ -3,9 +3,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use irc::client::Sender;
 use irc::proto::{Command, Message};
+use tokio::sync::Notify;
 
 use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
 use crate::command::{parse_user_command, UserCommand};
@@ -21,6 +24,7 @@ pub struct ServerState {
     pub show_join_part: bool,
     pub history_limit: usize,
     pub sender: Option<Sender>,
+    pub reconnect_notify: Arc<Notify>,
 }
 
 pub struct App {
@@ -54,6 +58,7 @@ impl App {
                     show_join_part: srv.effective_show_join_part(config.show_join_part),
                     history_limit: limit,
                     sender: None,
+                    reconnect_notify: Arc::new(Notify::new()),
                 },
             );
 
@@ -130,6 +135,12 @@ impl App {
             .unwrap_or(true)
     }
 
+    pub fn reconnect_notify_for(&self, server_id: &str) -> Option<Arc<Notify>> {
+        self.servers
+            .get(server_id)
+            .map(|s| Arc::clone(&s.reconnect_notify))
+    }
+
     pub fn sender_for(&self, server_id: &str) -> Option<&Sender> {
         self.servers.get(server_id).and_then(|s| s.sender.as_ref())
     }
@@ -145,6 +156,7 @@ impl App {
                     show_join_part: true,
                     history_limit: DEFAULT_HISTORY_LIMIT,
                     sender: None,
+                    reconnect_notify: Arc::new(Notify::new()),
                 },
             );
             String::new()
@@ -163,6 +175,7 @@ impl App {
                         show_join_part: true,
                         history_limit: DEFAULT_HISTORY_LIMIT,
                         sender: Some(s),
+                        reconnect_notify: Arc::new(Notify::new()),
                     },
                 );
             }
@@ -794,6 +807,9 @@ impl App {
             UserCommand::Reconnect => {
                 if let Some(sender) = self.set_sender(&server_id, None) {
                     let _ = sender.send(Command::QUIT(Some("Reconnecting...".to_string())));
+                }
+                if let Some(notify) = self.reconnect_notify_for(&server_id) {
+                    notify.notify_one();
                 }
                 self.reset_server_channels(&server_id);
                 self.push_system(self.active_buffer, format!("* Reconnecting to [{server_id}]..."));

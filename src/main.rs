@@ -9,6 +9,7 @@ pub mod irc_handler;
 pub mod log_store;
 pub mod ui;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -18,7 +19,7 @@ use irc::client::prelude::{Client, Config as IrcConfig};
 use irc::error::Error as IrcError;
 use irc::proto::{Command, Response};
 use ratatui::DefaultTerminal;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
 
 use crate::app::App;
 use crate::config::AppConfig;
@@ -48,11 +49,15 @@ async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Resul
         let irc_cfg = srv_cfg.to_irc_config(app_config.default_nickname.as_deref())?;
         let tx = tx.clone();
         let shutdown_rx = shutdown_rx.clone();
+        let reconnect = app
+            .reconnect_notify_for(&server_id)
+            .unwrap_or_else(|| Arc::new(Notify::new()));
         server_handles.push(tokio::spawn(run_server_loop(
             server_id,
             irc_cfg,
             tx,
             shutdown_rx,
+            reconnect,
         )));
     }
     drop(tx);
@@ -100,6 +105,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app_config: AppConfig) -> Resul
 enum SessionEnd {
     ReceiverClosed,
     Shutdown,
+    Reconnect,
     Retry(String),
 }
 
@@ -108,13 +114,16 @@ async fn run_server_loop(
     irc_cfg: IrcConfig,
     tx: mpsc::UnboundedSender<ServerEvent>,
     mut shutdown: watch::Receiver<bool>,
+    reconnect: Arc<Notify>,
 ) {
     loop {
         if *shutdown.borrow() {
             break;
         }
-        match connect_and_stream(&server_id, irc_cfg.clone(), &tx, &mut shutdown).await {
+        match connect_and_stream(&server_id, irc_cfg.clone(), &tx, &mut shutdown, &reconnect).await
+        {
             SessionEnd::ReceiverClosed | SessionEnd::Shutdown => break,
+            SessionEnd::Reconnect => continue,
             SessionEnd::Retry(error) => {
                 if tx
                     .send(ServerEvent::Error {
@@ -129,6 +138,7 @@ async fn run_server_loop(
         }
         tokio::select! {
             _ = shutdown.changed() => break,
+            _ = reconnect.notified() => {}
             _ = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
     }
@@ -139,6 +149,7 @@ async fn connect_and_stream(
     irc_cfg: IrcConfig,
     tx: &mpsc::UnboundedSender<ServerEvent>,
     shutdown: &mut watch::Receiver<bool>,
+    reconnect: &Notify,
 ) -> SessionEnd {
     if *shutdown.borrow() {
         return SessionEnd::Shutdown;
@@ -146,6 +157,7 @@ async fn connect_and_stream(
 
     let mut client = tokio::select! {
         _ = shutdown.changed() => return SessionEnd::Shutdown,
+        _ = reconnect.notified() => return SessionEnd::Reconnect,
         res = Client::from_config(irc_cfg) => match res {
             Ok(c) => c,
             Err(err) => return SessionEnd::Retry(format!("Connection failed: {err} (retrying in 5s)")),
@@ -191,6 +203,10 @@ async fn connect_and_stream(
             _ = shutdown.changed() => {
                 let _ = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
                 return SessionEnd::Shutdown;
+            }
+            _ = reconnect.notified() => {
+                let _ = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+                return SessionEnd::Reconnect;
             }
             item = stream.next() => {
                 match item {
@@ -265,7 +281,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let end = connect_and_stream("libera", irc_cfg, &tx, &mut shutdown_rx).await;
+        let reconnect = Notify::new();
+        let end =
+            connect_and_stream("libera", irc_cfg, &tx, &mut shutdown_rx, &reconnect).await;
         assert!(matches!(end, SessionEnd::Retry(_)));
         drop(tx);
 
@@ -323,11 +341,13 @@ mod tests {
             .to_irc_config(cfg.default_nickname.as_deref())
             .unwrap();
 
+        let reconnect = app.reconnect_notify_for(srv_id).unwrap();
         let srv_loop = tokio::spawn(run_server_loop(
             srv_id.clone(),
             irc_cfg,
             tx,
             shutdown_rx,
+            reconnect,
         ));
 
         while let Some(event) = rx.recv().await {
@@ -349,5 +369,73 @@ mod tests {
             received.iter().any(|l| l.contains("QUIT :time to go")),
             "Expected QUIT message in received lines: {received:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn reconnect_command_aborts_hung_session_immediately() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server_thread = std::thread::spawn(move || {
+            // First connection hangs without closing after QUIT
+            let (_sock1, _) = listener.accept().unwrap();
+            // Second connection proves immediate reconnect without 5s backoff
+            let (_sock2, _) = listener.accept().unwrap();
+        });
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            [servers.test_srv]
+            server = "127.0.0.1"
+            port = {port}
+            use_tls = false
+        "##
+        );
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let (srv_id, srv_cfg) = cfg.enabled_servers().next().unwrap();
+        let irc_cfg = srv_cfg
+            .to_irc_config(cfg.default_nickname.as_deref())
+            .unwrap();
+        let reconnect = app.reconnect_notify_for(srv_id).unwrap();
+
+        let srv_loop = tokio::spawn(run_server_loop(
+            srv_id.clone(),
+            irc_cfg,
+            tx,
+            shutdown_rx,
+            reconnect,
+        ));
+
+        while let Some(event) = rx.recv().await {
+            let is_connected = matches!(event, ServerEvent::Connected { .. });
+            app.handle_server_event(event);
+            if is_connected {
+                break;
+            }
+        }
+
+        app.execute_user_command(crate::command::UserCommand::Reconnect);
+
+        let reconnected = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, ServerEvent::Connected { .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(reconnected, "Expected immediate reconnect on /reconnect");
+
+        let _ = shutdown_tx.send(true);
+        let _ = srv_loop.await;
+        server_thread.join().unwrap();
     }
 }
