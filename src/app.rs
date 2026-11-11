@@ -316,7 +316,9 @@ impl App {
                 && buf.kind == BufferKind::Channel
                 && !buf.parted
             {
-                let _ = sender.send_join(&buf.name);
+                let _ = sender.send(Command::JOIN(
+                    buf.name.clone(), buf.channel_key.clone(), None,
+                ));
             }
         }
     }
@@ -657,12 +659,16 @@ impl App {
                 self.help_scroll = 0;
             }
             UserCommand::Join { channels, keys } => {
-                if !self.send_irc(&server_id, Command::JOIN(channels.clone(), keys, None)) {
+                if !self.send_irc(&server_id, Command::JOIN(channels.clone(), keys.clone(), None)) {
                     return;
                 }
+                let mut keys = keys.as_deref().unwrap_or("").split(',');
                 let mut last_idx = None;
                 for chan in channels.split(',').filter(|c| !c.is_empty()) {
                     let idx = self.ensure_buffer(&server_id, chan, BufferKind::Channel);
+                    if let Some(key) = keys.next().filter(|key| !key.is_empty()) {
+                        self.buffers[idx].channel_key = Some(key.to_string());
+                    }
                     self.buffers[idx].parted = false;
                     last_idx = Some(idx);
                 }
@@ -1158,6 +1164,35 @@ mod tests {
             let idx = app.find_buffer("libera", &target).unwrap();
             assert!(app.buffers[idx].messages.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn retains_per_channel_keys_for_reconnect() {
+        let (_, messages) = capture_outgoing(|app| {
+            app.execute_user_command(UserCommand::Join {
+                channels: "#secret,#open,#other".into(),
+                keys: Some("first,,second".into()),
+            });
+            // Repeating a keyless join must not discard a known key.
+            app.execute_user_command(UserCommand::Join {
+                channels: "#secret".into(),
+                keys: None,
+            });
+            let idx = app.find_buffer("libera", "#linux").unwrap();
+            app.buffers[idx].mark_parted();
+            app.reset_server_channels("libera");
+            app.join_server_channels("libera");
+        })
+        .await;
+        let joins: Vec<_> = messages.into_iter().map(|message| message.command).collect();
+        assert_eq!(joins, vec![
+            Command::JOIN("#secret,#open,#other".into(), Some("first,,second".into()), None),
+            Command::JOIN("#secret".into(), None, None),
+            Command::JOIN("#rust".into(), None, None),
+            Command::JOIN("#secret".into(), Some("first".into()), None),
+            Command::JOIN("#open".into(), None, None),
+            Command::JOIN("#other".into(), Some("second".into()), None),
+        ]);
     }
 
     #[test]
