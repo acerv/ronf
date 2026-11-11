@@ -14,6 +14,7 @@ pub enum ServerEvent {
     Connected {
         server_id: String,
         sender: Sender,
+        nick: String,
     },
     Message {
         server_id: String,
@@ -94,8 +95,9 @@ impl App {
 
     pub fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
-            ServerEvent::Connected { server_id, sender } => {
+            ServerEvent::Connected { server_id, sender, nick } => {
                 self.reset_server_channels(&server_id);
+                self.set_nick(&server_id, nick);
                 self.set_sender(&server_id, Some(sender));
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_system(idx, format!("Connected to [{server_id}]"));

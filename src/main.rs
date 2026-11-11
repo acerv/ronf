@@ -178,6 +178,7 @@ async fn connect_and_stream(
         .send(ServerEvent::Connected {
             server_id: server_id.to_string(),
             sender: client.sender(),
+            nick: client.current_nickname().to_string(),
         })
         .is_err()
     {
@@ -255,6 +256,55 @@ async fn connect_and_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resets_nickname_fallback_on_each_connection() {
+        let config = AppConfig::from_toml_str(
+            "default_nickname = 'irc_user'\n[servers.libera]\n\
+             server = 'irc.example.org'\n[servers.other]\nserver = 'other.example.org'",
+        )
+        .unwrap();
+        let mut app = App::from_config(&config);
+        app.set_nick("libera", "old_nickname_____".into());
+        app.set_nick("other", "unchanged".into());
+
+        for _ in 0..6 {
+            let irc_cfg = IrcConfig {
+                nickname: Some("irc_user".into()),
+                server: Some("irc.example.org".into()),
+                use_mock_connection: true,
+                mock_initial_value: Some(
+                    ":irc.test 433 * irc_user :Nickname is already in use\r\n\
+                     :irc.test 433 * irc_user_ :Nickname is already in use\r\n".into(),
+                ),
+                ..IrcConfig::default()
+            };
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            let reconnect = Notify::new();
+            let end = connect_and_stream(
+                "libera", irc_cfg, &tx, &mut shutdown_rx, &reconnect,
+            )
+            .await;
+            assert!(matches!(end, SessionEnd::Retry(_)));
+            drop(tx);
+
+            let mut collisions = 0;
+            while let Some(event) = rx.recv().await {
+                let connected = matches!(event, ServerEvent::Connected { .. });
+                if matches!(event, ServerEvent::NickRejected { .. }) {
+                    collisions += 1;
+                }
+                app.handle_server_event(event);
+                if connected {
+                    assert_eq!(app.nick_for("libera"), "irc_user");
+                }
+            }
+            assert_eq!(collisions, 2);
+            assert_eq!(app.nick_for("libera"), "irc_user__");
+            assert_eq!(app.nick_for("other"), "unchanged");
+        }
+    }
 
     #[tokio::test]
     async fn survives_nick_collisions_before_and_after_welcome() {
