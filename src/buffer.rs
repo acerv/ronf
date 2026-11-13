@@ -1,7 +1,52 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use chrono::Local;
+use std::collections::VecDeque;
+
+use chrono::{Local, Timelike};
 use irc::proto::{ChannelMode, Mode};
+
+pub const MAX_BUFFER_MESSAGES: usize = 5000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timestamp([u8; 8]);
+
+impl Timestamp {
+    pub fn now() -> Self {
+        let now = Local::now();
+        let h = now.hour() as u8;
+        let m = now.minute() as u8;
+        let s = now.second() as u8;
+        Self([
+            b'0' + h / 10,
+            b'0' + h % 10,
+            b':',
+            b'0' + m / 10,
+            b'0' + m % 10,
+            b':',
+            b'0' + s / 10,
+            b'0' + s % 10,
+        ])
+    }
+
+    pub fn from_hms_str(s: &str) -> Self {
+        if let Ok(bytes) = <[u8; 8]>::try_from(s.as_bytes()) {
+            if bytes.is_ascii() {
+                return Self(bytes);
+            }
+        }
+        Self(*b"??:??:??")
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or("??:??:??")
+    }
+}
+
+impl std::fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -13,7 +58,7 @@ pub enum LineKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {
-    pub timestamp: String,
+    pub timestamp: Timestamp,
     pub sender: Option<String>,
     pub content: String,
     pub kind: LineKind,
@@ -22,7 +67,7 @@ pub struct ChatLine {
 impl ChatLine {
     pub fn new(sender: Option<String>, content: impl Into<String>, kind: LineKind) -> Self {
         Self {
-            timestamp: Local::now().format("%H:%M:%S").to_string(),
+            timestamp: Timestamp::now(),
             sender,
             content: content.into(),
             kind,
@@ -47,7 +92,7 @@ pub struct Buffer {
     pub users: Vec<String>,
     pub pending_names: Vec<String>,
     pub user_scroll_offset: usize,
-    pub messages: Vec<ChatLine>,
+    pub messages: VecDeque<ChatLine>,
     pub history_cursor: Option<usize>,
     pub scroll_offset: usize,
     pub unread: bool,
@@ -66,7 +111,7 @@ impl Buffer {
             users: Vec::new(),
             pending_names: Vec::new(),
             user_scroll_offset: 0,
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             history_cursor: None,
             scroll_offset: 0,
             unread: false,
@@ -76,9 +121,11 @@ impl Buffer {
     }
 
     pub fn push_line(&mut self, line: ChatLine, is_active: bool) {
-        self.messages.push(line);
+        self.messages.push_back(line);
         if self.scroll_offset > 0 {
             self.scroll_offset = self.scroll_offset.saturating_add(1);
+        } else if self.messages.len() > MAX_BUFFER_MESSAGES {
+            self.messages.pop_front();
         }
         if !is_active || self.scroll_offset > 0 {
             self.unread = true;
@@ -326,5 +373,19 @@ mod tests {
         ];
         buf.sort_users();
         assert_eq!(buf.users, vec!["@alice", "@BOB", "+charlie"]);
+    }
+
+    #[test]
+    fn bounds_in_memory_messages_when_not_scrolled_up() {
+        let mut buf = Buffer::new("libera", "#rust", BufferKind::Channel);
+        for i in 0..(MAX_BUFFER_MESSAGES + 10) {
+            buf.push_line(ChatLine::new(None, format!("line {i}"), LineKind::Normal), true);
+        }
+        assert_eq!(buf.messages.len(), MAX_BUFFER_MESSAGES);
+        assert_eq!(buf.messages.front().unwrap().content, "line 10");
+        assert_eq!(
+            buf.messages.back().unwrap().content,
+            format!("line {}", MAX_BUFFER_MESSAGES + 9)
+        );
     }
 }

@@ -249,7 +249,7 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
 
     let mut acc_rows = 0usize;
     let mut visible_lines = Vec::with_capacity(inner_height.min(end));
-    for msg in buf.messages[..end].iter().rev() {
+    for msg in buf.messages.range(..end).rev() {
         if acc_rows >= inner_height {
             break;
         }

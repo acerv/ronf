@@ -1175,7 +1175,7 @@ mod tests {
             .await;
             assert!(messages.is_empty());
             assert!(app.sender_for("libera").is_some());
-            assert_eq!(app.active_buf().messages.last().unwrap().kind, LineKind::Error);
+            assert_eq!(app.active_buf().messages.back().unwrap().kind, LineKind::Error);
             let idx = app.find_buffer("libera", &target).unwrap();
             assert!(app.buffers[idx].messages.is_empty());
         }
@@ -1585,7 +1585,7 @@ mod tests {
         assert_eq!(renamed_dm, dm_idx);
         assert!(app.buffers[renamed_dm]
             .messages
-            .last()
+            .back()
             .unwrap()
             .content
             .contains("bob is now known as bob_away"));
@@ -2149,7 +2149,7 @@ mod tests {
             },
         );
         assert_eq!(
-            app.buffers[rust_idx].messages.last().unwrap().content,
+            app.buffers[rust_idx].messages.back().unwrap().content,
             "-alice- ops notice"
         );
     }
@@ -2334,7 +2334,7 @@ mod tests {
         assert!(app.find_buffer("libera", "scanner").is_none());
         assert!(app.buffers[srv_idx]
             .messages
-            .last()
+            .back()
             .unwrap()
             .content
             .contains("[ctcp] scanner: VERSION"));
@@ -2408,7 +2408,7 @@ mod tests {
             },
         );
         assert_eq!(
-            app.buffers[rust_idx].messages.last().unwrap().content,
+            app.buffers[rust_idx].messages.back().unwrap().content,
             "* Mode for #rust is +nt"
         );
 
@@ -2424,7 +2424,7 @@ mod tests {
             },
         );
         assert_eq!(
-            app.buffers[srv_idx].messages.last().unwrap().content,
+            app.buffers[srv_idx].messages.back().unwrap().content,
             "* User mode is +i"
         );
 
@@ -2440,7 +2440,7 @@ mod tests {
             },
         );
         assert_eq!(
-            app.buffers[srv_idx].messages.last().unwrap().content,
+            app.buffers[srv_idx].messages.back().unwrap().content,
             "* irc_user sets mode +i on irc_user"
         );
     }
@@ -2463,14 +2463,14 @@ mod tests {
         let cmd = crate::command::parse_user_command("/mode mynick +i").unwrap();
         app.execute_user_command(cmd);
         assert_eq!(
-            app.buffers[rust_idx].messages.last().unwrap().content,
+            app.buffers[rust_idx].messages.back().unwrap().content,
             "* Mode mynick +i"
         );
 
         let cmd = crate::command::parse_user_command("/mode").unwrap();
         app.execute_user_command(cmd);
         assert_eq!(
-            app.buffers[rust_idx].messages.last().unwrap().content,
+            app.buffers[rust_idx].messages.back().unwrap().content,
             "* Mode #rust"
         );
 
@@ -2479,7 +2479,7 @@ mod tests {
         let cmd = crate::command::parse_user_command("/mode").unwrap();
         app.execute_user_command(cmd);
         assert_eq!(
-            app.buffers[srv_idx].messages.last().unwrap().content,
+            app.buffers[srv_idx].messages.back().unwrap().content,
             "* Mode irc_user"
         );
     }

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::VecDeque;
+
 use crate::buffer::strip_user_prefix;
 use crate::command::slash_command_names;
+
+pub const MAX_INPUT_HISTORY: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct TabCompletionState {
@@ -15,7 +19,7 @@ pub struct TabCompletionState {
 pub struct InputState {
     pub text: String,
     pub cursor_pos: usize,
-    pub history: Vec<String>,
+    pub history: VecDeque<String>,
     pub history_index: Option<usize>,
     pub saved_draft: String,
     pub tab_state: Option<TabCompletionState>,
@@ -201,8 +205,11 @@ impl InputState {
             return None;
         }
 
-        if self.history.last() != Some(&line) {
-            self.history.push(line.clone());
+        if self.history.back() != Some(&line) {
+            if self.history.len() >= MAX_INPUT_HISTORY {
+                self.history.pop_front();
+            }
+            self.history.push_back(line.clone());
         }
 
         Some(line)
@@ -251,5 +258,20 @@ mod tests {
 
         input.clear_line();
         assert!(input.tab_state.is_none());
+    }
+
+    #[test]
+    fn bounds_input_history_to_max_entries() {
+        let mut input = InputState::default();
+        for i in 0..(MAX_INPUT_HISTORY + 10) {
+            input.set_text(format!("msg {i}"));
+            input.take_submitted();
+        }
+        assert_eq!(input.history.len(), MAX_INPUT_HISTORY);
+        assert_eq!(input.history.front().map(String::as_str), Some("msg 10"));
+        assert_eq!(
+            input.history.back().map(String::as_str),
+            Some(format!("msg {}", MAX_INPUT_HISTORY + 9).as_str())
+        );
     }
 }

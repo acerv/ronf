@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind};
+use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind, Timestamp};
 
 fn sanitize_log_component(raw: &str, allow_chan_prefix: bool) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -240,7 +240,7 @@ fn parse_log_line(raw: &str) -> Option<ChatLine> {
             return None;
         }
         Some(ChatLine {
-            timestamp: ts.to_string(),
+            timestamp: Timestamp::from_hms_str(ts),
             sender: Some(actor.to_string()),
             content: act_text.to_string(),
             kind: LineKind::Action,
@@ -248,7 +248,7 @@ fn parse_log_line(raw: &str) -> Option<ChatLine> {
     } else if let Some(nick_rest) = after_ts.strip_prefix('<') {
         let (sender, msg_text) = nick_rest.split_once("> ")?;
         Some(ChatLine {
-            timestamp: ts.to_string(),
+            timestamp: Timestamp::from_hms_str(ts),
             sender: Some(sender.to_string()),
             content: msg_text.to_string(),
             kind: LineKind::Normal,
@@ -290,10 +290,9 @@ pub(crate) fn load_more_buffer_history(base_dir: &Path, buf: &mut Buffer, limit:
     }
 
     buf.history_cursor = Some(new_cursor);
-    batch.reverse();
     let loaded = batch.len();
-    if loaded > 0 {
-        buf.messages.splice(0..0, batch);
+    for line in batch {
+        buf.messages.push_front(line);
     }
     loaded
 }
@@ -376,7 +375,7 @@ mod tests {
         assert_eq!(
             parse_log_line("[12:00:00] * alice"),
             Some(ChatLine {
-                timestamp: "12:00:00".into(),
+                timestamp: Timestamp::from_hms_str("12:00:00"),
                 sender: Some("alice".into()),
                 content: "".into(),
                 kind: LineKind::Action,
