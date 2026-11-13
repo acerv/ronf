@@ -444,8 +444,8 @@ impl App {
         let idx = self.target_buffer_for_server(server_id);
         match code {
             "330" => {
-                if args.len() >= 3 {
-                    self.push_whois(idx, &args[1], format!("is logged in as {}", args[2]));
+                if let [_, nick, acct, ..] = args.as_slice() {
+                    self.push_whois(idx, nick, format!("is logged in as {acct}"));
                 }
             }
             "378" | "671" => self.push_whois_tail(idx, &args),
@@ -457,14 +457,14 @@ impl App {
         let srv_target = self.target_buffer_for_server(server_id);
         match resp {
             Response::RPL_CHANNELMODEIS => {
-                if args.len() >= 2 {
-                    let (chan, modes) = if is_channel_name(&args[0]) {
-                        (&args[0], args[1..].join(" "))
-                    } else if args.len() >= 3 {
-                        (&args[1], args[2..].join(" "))
-                    } else {
-                        (&args[1], String::new())
-                    };
+                if let Some((chan, rest)) = match args.as_slice() {
+                    [first, rest @ ..] if !rest.is_empty() && is_channel_name(first) => {
+                        Some((first, rest))
+                    }
+                    [_, chan, rest @ ..] => Some((chan, rest)),
+                    _ => None,
+                } {
+                    let modes = rest.join(" ");
                     let idx = self.find_buffer(server_id, chan).unwrap_or(srv_target);
                     let text = if modes.is_empty() {
                         format!("* Mode for {chan}")
@@ -475,40 +475,34 @@ impl App {
                 }
             }
             Response::RPL_UMODEIS => {
-                let modes = if args.len() >= 2 {
-                    args[1..].join(" ")
-                } else {
-                    args.join(" ")
-                };
-                self.push_system(srv_target, format!("* User mode is {modes}"));
+                self.push_system(srv_target, format!("* User mode is {}", trailing_text(&args)));
             }
             Response::RPL_NOTOPIC => {
-                if args.len() >= 2 {
-                    self.set_channel_topic(server_id, &args[1], None, true);
+                if let [_, chan, ..] = args.as_slice() {
+                    self.set_channel_topic(server_id, chan, None, true);
                 }
             }
             Response::RPL_TOPIC => {
-                if args.len() >= 3 {
-                    self.set_channel_topic(server_id, &args[1], Some(args[2..].join(" ")), false);
+                if let [_, chan, rest @ ..] = args.as_slice() {
+                    if !rest.is_empty() {
+                        self.set_channel_topic(server_id, chan, Some(rest.join(" ")), false);
+                    }
                 }
             }
             Response::RPL_NAMREPLY => {
-                if args.len() >= 4 {
-                    if let Some(idx) = self.find_buffer(server_id, &args[2]) {
+                if let [_, _, chan, names, ..] = args.as_slice() {
+                    if let Some(idx) = self.find_buffer(server_id, chan) {
                         self.buffers[idx]
                             .pending_names
-                            .extend(args[3].split_whitespace().map(str::to_string));
+                            .extend(names.split_whitespace().map(str::to_string));
                     } else {
-                        self.push_system(
-                            srv_target,
-                            format!("* [names] {}: {}", args[2], args[3].trim()),
-                        );
+                        self.push_system(srv_target, format!("* [names] {chan}: {}", names.trim()));
                     }
                 }
             }
             Response::RPL_ENDOFNAMES => {
-                if args.len() >= 2 {
-                    if let Some(idx) = self.find_buffer(server_id, &args[1]) {
+                if let [_, chan, ..] = args.as_slice() {
+                    if let Some(idx) = self.find_buffer(server_id, chan) {
                         let pending = std::mem::take(&mut self.buffers[idx].pending_names);
                         self.buffers[idx].users = pending;
                         self.buffers[idx].sort_users();
@@ -516,58 +510,53 @@ impl App {
                 }
             }
             Response::RPL_WHOISUSER => {
-                if args.len() >= 6 {
-                    let real = args[5..].join(" ");
-                    self.push_whois(
-                        srv_target,
-                        &args[1],
-                        format!("({}@{}): {real}", args[2], args[3]),
-                    );
+                if let [_, nick, user, host, _, rest @ ..] = args.as_slice() {
+                    if !rest.is_empty() {
+                        self.push_whois(
+                            srv_target,
+                            nick,
+                            format!("({user}@{host}): {}", rest.join(" ")),
+                        );
+                    }
                 }
             }
             Response::RPL_WHOISSERVER => {
-                if args.len() >= 4 {
-                    let info = args[3..].join(" ");
-                    self.push_whois(
-                        srv_target,
-                        &args[1],
-                        format!("server: {} ({info})", args[2]),
-                    );
+                if let [_, nick, srv, rest @ ..] = args.as_slice() {
+                    if !rest.is_empty() {
+                        self.push_whois(
+                            srv_target,
+                            nick,
+                            format!("server: {srv} ({})", rest.join(" ")),
+                        );
+                    }
                 }
             }
             Response::RPL_WHOISOPERATOR => self.push_whois_tail(srv_target, &args),
             Response::RPL_WHOISIDLE => {
-                if args.len() >= 3 {
-                    self.push_whois(srv_target, &args[1], format!("idle: {}s", args[2]));
+                if let [_, nick, secs, ..] = args.as_slice() {
+                    self.push_whois(srv_target, nick, format!("idle: {secs}s"));
                 }
             }
             Response::RPL_WHOISCHANNELS => {
-                if args.len() >= 3 {
-                    self.push_whois(
-                        srv_target,
-                        &args[1],
-                        format!("channels: {}", args[2..].join(" ")),
-                    );
+                if let [_, nick, rest @ ..] = args.as_slice() {
+                    if !rest.is_empty() {
+                        self.push_whois(srv_target, nick, format!("channels: {}", rest.join(" ")));
+                    }
                 }
             }
             Response::RPL_ENDOFWHOIS => {
-                if args.len() >= 2 {
-                    self.push_whois(srv_target, &args[1], "End of WHOIS");
+                if let [_, nick, ..] = args.as_slice() {
+                    self.push_whois(srv_target, nick, "End of WHOIS");
                 }
             }
             Response::RPL_UNAWAY | Response::RPL_NOWAWAY => {
                 self.push_system(srv_target, format!("* {}", trailing_text(&args)));
             }
             Response::RPL_LIST => {
-                if args.len() >= 3 {
-                    let topic = if args.len() >= 4 {
-                        args[3..].join(" ")
-                    } else {
-                        String::new()
-                    };
+                if let [_, chan, count, rest @ ..] = args.as_slice() {
                     self.push_system(
                         srv_target,
-                        format!("* [list] {} ({}): {topic}", args[1], args[2]),
+                        format!("* [list] {chan} ({count}): {}", rest.join(" ")),
                     );
                 }
             }

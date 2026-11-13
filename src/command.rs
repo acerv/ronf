@@ -168,7 +168,7 @@ pub enum UserCommand {
     Invite { nick: String, channel: Option<String> },
     Mode {
         target: Option<String>,
-        args: String,
+        args: Vec<String>,
         channel_only: bool,
     },
     Away(Option<String>),
@@ -276,7 +276,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             if rest.is_empty() {
                 Some(UserCommand::Mode {
                     target: None,
-                    args: String::new(),
+                    args: Vec::new(),
                     channel_only: false,
                 })
             } else {
@@ -284,13 +284,15 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 if first.starts_with(['+', '-']) {
                     Some(UserCommand::Mode {
                         target: None,
-                        args: rest.to_string(),
+                        args: rest.split_whitespace().map(str::to_string).collect(),
                         channel_only: false,
                     })
                 } else {
                     Some(UserCommand::Mode {
                         target: Some(first),
-                        args: rem.unwrap_or_default(),
+                        args: rem
+                            .map(|r| r.split_whitespace().map(str::to_string).collect())
+                            .unwrap_or_default(),
                         channel_only: false,
                     })
                 }
@@ -311,9 +313,12 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
             let flags: String = std::iter::once(sign)
                 .chain(std::iter::repeat_n(letter, targets.len()))
                 .collect();
+            let args = std::iter::once(flags)
+                .chain(targets.into_iter().map(str::to_string))
+                .collect();
             Some(UserCommand::Mode {
                 target: None,
-                args: format!("{flags} {}", targets.join(" ")),
+                args,
                 channel_only: true,
             })
         }
@@ -357,7 +362,7 @@ mod tests {
             parse_user_command("/mode"),
             Some(UserCommand::Mode {
                 target: None,
-                args: String::new(),
+                args: Vec::new(),
                 channel_only: false,
             })
         );
@@ -365,7 +370,7 @@ mod tests {
             parse_user_command("/mode mynick"),
             Some(UserCommand::Mode {
                 target: Some("mynick".to_string()),
-                args: String::new(),
+                args: Vec::new(),
                 channel_only: false,
             })
         );
@@ -373,7 +378,7 @@ mod tests {
             parse_user_command("/mode mynick +i"),
             Some(UserCommand::Mode {
                 target: Some("mynick".to_string()),
-                args: "+i".to_string(),
+                args: vec!["+i".to_string()],
                 channel_only: false,
             })
         );
@@ -381,7 +386,7 @@ mod tests {
             parse_user_command("/mode #rust +m"),
             Some(UserCommand::Mode {
                 target: Some("#rust".to_string()),
-                args: "+m".to_string(),
+                args: vec!["+m".to_string()],
                 channel_only: false,
             })
         );
@@ -389,7 +394,7 @@ mod tests {
             parse_user_command("/mode +i"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+i".to_string(),
+                args: vec!["+i".to_string()],
                 channel_only: false,
             })
         );
@@ -397,7 +402,7 @@ mod tests {
             parse_user_command("/mode +m -t"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+m -t".to_string(),
+                args: vec!["+m".to_string(), "-t".to_string()],
                 channel_only: false,
             })
         );
@@ -405,7 +410,7 @@ mod tests {
             parse_user_command("/mode +i +w"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+i +w".to_string(),
+                args: vec!["+i".to_string(), "+w".to_string()],
                 channel_only: false,
             })
         );
@@ -413,7 +418,7 @@ mod tests {
             parse_user_command("/op alice"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+o alice".to_string(),
+                args: vec!["+o".to_string(), "alice".to_string()],
                 channel_only: true,
             })
         );
@@ -421,7 +426,7 @@ mod tests {
             parse_user_command("/op alice bob"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+oo alice bob".to_string(),
+                args: vec!["+oo".to_string(), "alice".to_string(), "bob".to_string()],
                 channel_only: true,
             })
         );
@@ -429,7 +434,7 @@ mod tests {
             parse_user_command("/ban *!*@bad.host"),
             Some(UserCommand::Mode {
                 target: None,
-                args: "+b *!*@bad.host".to_string(),
+                args: vec!["+b".to_string(), "*!*@bad.host".to_string()],
                 channel_only: true,
             })
         );

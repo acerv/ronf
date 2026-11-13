@@ -132,6 +132,11 @@ impl Buffer {
         }
     }
 
+    pub fn mark_read(&mut self) {
+        self.unread = false;
+        self.highlight = false;
+    }
+
     pub fn mark_parted(&mut self) {
         self.parted = true;
         self.users.clear();

@@ -42,6 +42,19 @@ pub struct App {
     pub should_quit: bool,
 }
 
+impl ServerState {
+    fn new(nick: String, show_join_part: bool, history_limit: usize) -> Self {
+        Self {
+            nick,
+            show_join_part,
+            history_limit,
+            sender: None,
+            reconnect_notify: Arc::new(Notify::new()),
+            auto_joined: false,
+        }
+    }
+}
+
 impl App {
     pub fn from_config(config: &AppConfig) -> Self {
         let mut buffers = Vec::new();
@@ -54,15 +67,8 @@ impl App {
                 .unwrap_or_else(|_| DEFAULT_GENERIC_NICK.to_string());
             let limit = srv.effective_history_limit(config.history_limit);
             servers.insert(
-                server_id.clone(),
-                ServerState {
-                    nick,
-                    show_join_part: srv.effective_show_join_part(config.show_join_part),
-                    history_limit: limit,
-                    sender: None,
-                    reconnect_notify: Arc::new(Notify::new()),
-                    auto_joined: false,
-                },
+                server_id.to_ascii_lowercase(),
+                ServerState::new(nick, srv.effective_show_join_part(config.show_join_part), limit),
             );
 
             let mut srv_buf = Buffer::new(server_id.clone(), server_id.clone(), BufferKind::Server);
@@ -137,22 +143,23 @@ impl App {
     }
 
     fn server_state(&self, server_id: &str) -> Option<&ServerState> {
-        self.servers.get(server_id).or_else(|| {
-            self.servers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(server_id))
-                .map(|(_, v)| v)
-        })
+        self.servers
+            .get(server_id)
+            .or_else(|| self.servers.get(&server_id.to_ascii_lowercase()))
     }
 
     fn server_state_mut(&mut self, server_id: &str) -> Option<&mut ServerState> {
         if self.servers.contains_key(server_id) {
             return self.servers.get_mut(server_id);
         }
-        self.servers
-            .iter_mut()
-            .find(|(k, _)| k.eq_ignore_ascii_case(server_id))
-            .map(|(_, v)| v)
+        self.servers.get_mut(&server_id.to_ascii_lowercase())
+    }
+
+    fn server_state_or_insert(&mut self, server_id: &str) -> &mut ServerState {
+        let key = server_id.to_ascii_lowercase();
+        self.servers.entry(key).or_insert_with(|| {
+            ServerState::new(DEFAULT_GENERIC_NICK.to_string(), true, DEFAULT_HISTORY_LIMIT)
+        })
     }
 
     pub fn history_limit_for(&self, server_id: &str) -> usize {
@@ -177,22 +184,7 @@ impl App {
     }
 
     pub(crate) fn set_nick(&mut self, server_id: &str, new_nick: String) -> String {
-        if let Some(srv) = self.server_state_mut(server_id) {
-            std::mem::replace(&mut srv.nick, new_nick)
-        } else {
-            self.servers.insert(
-                server_id.to_string(),
-                ServerState {
-                    nick: new_nick,
-                    show_join_part: true,
-                    history_limit: DEFAULT_HISTORY_LIMIT,
-                    sender: None,
-                    reconnect_notify: Arc::new(Notify::new()),
-                    auto_joined: false,
-                },
-            );
-            String::new()
-        }
+        std::mem::replace(&mut self.server_state_or_insert(server_id).nick, new_nick)
     }
 
     pub(crate) fn set_auto_joined(&mut self, server_id: &str, joined: bool) {
@@ -209,18 +201,8 @@ impl App {
         if let Some(srv) = self.server_state_mut(server_id) {
             std::mem::replace(&mut srv.sender, sender)
         } else {
-            if let Some(s) = sender {
-                self.servers.insert(
-                    server_id.to_string(),
-                    ServerState {
-                        nick: DEFAULT_GENERIC_NICK.to_string(),
-                        show_join_part: true,
-                        history_limit: DEFAULT_HISTORY_LIMIT,
-                        sender: Some(s),
-                        reconnect_notify: Arc::new(Notify::new()),
-                        auto_joined: false,
-                    },
-                );
+            if sender.is_some() {
+                self.server_state_or_insert(server_id).sender = sender;
             }
             None
         }
@@ -251,8 +233,7 @@ impl App {
     pub fn select_buffer(&mut self, index: usize) {
         if index < self.buffers.len() {
             self.active_buffer = index;
-            self.buffers[index].unread = false;
-            self.buffers[index].highlight = false;
+            self.buffers[index].mark_read();
             self.buffers[index].scroll_offset = 0;
         }
     }
@@ -484,94 +465,43 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        if ctrl {
-            match key.code {
-                KeyCode::Char('c') => {
-                    self.input.cancel();
-                    return;
-                }
-                KeyCode::Char('q') => {
-                    self.quit_all(None);
-                    return;
-                }
-                KeyCode::Char('n') => {
-                    self.next_buffer();
-                    return;
-                }
-                KeyCode::Char('p') => {
-                    self.prev_buffer();
-                    return;
-                }
-                KeyCode::Char('a') => {
-                    self.input.move_home();
-                    return;
-                }
-                KeyCode::Char('e') => {
-                    self.input.move_end();
-                    return;
-                }
-                KeyCode::Char('u') => {
-                    self.input.clear_line();
-                    return;
-                }
-                KeyCode::Char('w') => {
-                    self.input.delete_word_backwards();
-                    return;
-                }
-                _ => return,
+        match (ctrl, alt, key.code) {
+            (true, _, KeyCode::Char('c')) => self.input.cancel(),
+            (true, _, KeyCode::Char('q')) => self.quit_all(None),
+            (true, _, KeyCode::Char('n')) | (false, true, KeyCode::Down) => self.next_buffer(),
+            (true, _, KeyCode::Char('p')) | (false, true, KeyCode::Up) => self.prev_buffer(),
+            (true, _, KeyCode::Char('a')) | (false, false, KeyCode::Home) => {
+                self.input.move_home();
             }
-        }
-
-        if alt {
-            match key.code {
-                KeyCode::Down => {
-                    self.next_buffer();
-                    return;
-                }
-                KeyCode::Up => {
-                    self.prev_buffer();
-                    return;
-                }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
-                    self.jump_to_unread();
-                    return;
-                }
-                KeyCode::PageUp => {
-                    let buf = self.active_buf_mut();
-                    buf.user_scroll_offset = buf.user_scroll_offset.saturating_sub(5);
-                    return;
-                }
-                KeyCode::PageDown => {
-                    let visible_rows = (self.term_height as usize).saturating_sub(1).max(1);
-                    let buf = self.active_buf_mut();
-                    let max_offset = buf.users.len().saturating_sub(visible_rows);
-                    buf.user_scroll_offset = buf.user_scroll_offset.saturating_add(5).min(max_offset);
-                    return;
-                }
-                KeyCode::Char(c @ '1'..='9') => {
-                    let idx = (c as usize) - ('1' as usize);
-                    self.select_buffer(idx);
-                    return;
-                }
-                _ => return,
+            (true, _, KeyCode::Char('e')) | (false, false, KeyCode::End) => self.input.move_end(),
+            (true, _, KeyCode::Char('u')) => self.input.clear_line(),
+            (true, _, KeyCode::Char('w')) => self.input.delete_word_backwards(),
+            (false, true, KeyCode::Char('a' | 'A')) => self.jump_to_unread(),
+            (false, true, KeyCode::PageUp) => {
+                let buf = self.active_buf_mut();
+                buf.user_scroll_offset = buf.user_scroll_offset.saturating_sub(5);
             }
-        }
-
-        match key.code {
-            KeyCode::Tab => {
+            (false, true, KeyCode::PageDown) => {
+                let visible_rows = (self.term_height as usize).saturating_sub(1).max(1);
+                let buf = self.active_buf_mut();
+                let max_offset = buf.users.len().saturating_sub(visible_rows);
+                buf.user_scroll_offset = buf.user_scroll_offset.saturating_add(5).min(max_offset);
+            }
+            (false, true, KeyCode::Char(c @ '1'..='9')) => {
+                self.select_buffer((c as usize) - ('1' as usize));
+            }
+            (false, false, KeyCode::Tab) => {
                 let users = &self.buffers[self.active_buffer].users;
                 self.input.complete_tab(users);
             }
-            KeyCode::Enter => self.submit_input(),
-            KeyCode::Up => self.input.history_prev(),
-            KeyCode::Down => self.input.history_next(),
-            KeyCode::Left => self.input.move_left(),
-            KeyCode::Right => self.input.move_right(),
-            KeyCode::Home => self.input.move_home(),
-            KeyCode::End => self.input.move_end(),
-            KeyCode::Backspace => self.input.backspace(),
-            KeyCode::Delete => self.input.delete_forward(),
-            KeyCode::PageUp => {
+            (false, false, KeyCode::Enter) => self.submit_input(),
+            (false, false, KeyCode::Up) => self.input.history_prev(),
+            (false, false, KeyCode::Down) => self.input.history_next(),
+            (false, false, KeyCode::Left) => self.input.move_left(),
+            (false, false, KeyCode::Right) => self.input.move_right(),
+            (false, false, KeyCode::Backspace) => self.input.backspace(),
+            (false, false, KeyCode::Delete) => self.input.delete_forward(),
+            (false, false, KeyCode::PageUp) => {
                 let server_id = self.active_server_id();
                 let limit = self.history_limit_for(&server_id);
                 let log_dir = self.log_dir.clone();
@@ -586,21 +516,19 @@ impl App {
                 let buf = self.active_buf_mut();
                 buf.scroll_offset = buf.scroll_offset.saturating_add(5).min(max_scroll);
             }
-            KeyCode::PageDown => {
+            (false, false, KeyCode::PageDown) => {
                 let buf = self.active_buf_mut();
                 buf.scroll_offset = buf.scroll_offset.saturating_sub(5);
                 if buf.scroll_offset == 0 {
-                    buf.unread = false;
-                    buf.highlight = false;
+                    buf.mark_read();
                 }
             }
-            KeyCode::Esc => {
+            (false, false, KeyCode::Esc) => {
                 let buf = self.active_buf_mut();
                 buf.scroll_offset = 0;
-                buf.unread = false;
-                buf.highlight = false;
+                buf.mark_read();
             }
-            KeyCode::Char(ch) => self.input.insert_char(ch),
+            (false, false, KeyCode::Char(ch)) => self.input.insert_char(ch),
             _ => {}
         }
     }
@@ -608,34 +536,34 @@ impl App {
     fn handle_help_key_event(&mut self, key: KeyEvent) {
         let max_scroll = crate::ui::help_max_scroll(self.term_height);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl {
-            match key.code {
-                KeyCode::Char('c') | KeyCode::Char('q') => self.quit_all(None),
-                KeyCode::Char('u') => self.help_scroll = self.help_scroll.saturating_sub(8),
-                KeyCode::Char('d') => {
-                    self.help_scroll = self.help_scroll.saturating_add(8).min(max_scroll);
-                }
-                _ => {}
+        match (ctrl, key.code) {
+            (true, KeyCode::Char('c' | 'q')) => self.quit_all(None),
+            (true, KeyCode::Char('u')) | (false, KeyCode::PageUp) => {
+                self.help_scroll = self.help_scroll.saturating_sub(8);
             }
-            return;
-        }
-
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.show_help = false,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.help_scroll = self.help_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.help_scroll = self.help_scroll.saturating_add(1).min(max_scroll);
-            }
-            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(8),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
+            (true, KeyCode::Char('d')) | (false, KeyCode::PageDown | KeyCode::Char(' ')) => {
                 self.help_scroll = self.help_scroll.saturating_add(8).min(max_scroll);
             }
-            KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
-            KeyCode::End | KeyCode::Char('G') => self.help_scroll = max_scroll,
+            (false, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) => self.show_help = false,
+            (false, KeyCode::Up | KeyCode::Char('k')) => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            (false, KeyCode::Down | KeyCode::Char('j')) => {
+                self.help_scroll = self.help_scroll.saturating_add(1).min(max_scroll);
+            }
+            (false, KeyCode::Home | KeyCode::Char('g')) => self.help_scroll = 0,
+            (false, KeyCode::End | KeyCode::Char('G')) => self.help_scroll = max_scroll,
             _ => {}
         }
+    }
+
+    fn open_target_buffer(&mut self, server_id: &str, target: &str) -> usize {
+        let kind = if is_channel_name(target) {
+            BufferKind::Channel
+        } else {
+            BufferKind::DirectMessage
+        };
+        self.ensure_buffer(server_id, target, kind)
     }
 
     pub fn submit_input(&mut self) {
@@ -700,29 +628,13 @@ impl App {
                     );
                     return;
                 }
-                let kind = if is_channel_name(&target) {
-                    BufferKind::Channel
-                } else {
-                    BufferKind::DirectMessage
-                };
-                let idx = self.ensure_buffer(&server_id, &target, kind);
-                if self.send_privmsg_and_echo(
-                    &server_id,
-                    idx,
-                    &target,
-                    text,
-                    LineKind::Normal,
-                ) {
+                let idx = self.open_target_buffer(&server_id, &target);
+                if self.send_privmsg_and_echo(&server_id, idx, &target, text, LineKind::Normal) {
                     self.select_buffer(idx);
                 }
             }
             UserCommand::Query { target, text } => {
-                let kind = if is_channel_name(&target) {
-                    BufferKind::Channel
-                } else {
-                    BufferKind::DirectMessage
-                };
-                let idx = self.ensure_buffer(&server_id, &target, kind);
+                let idx = self.open_target_buffer(&server_id, &target);
                 if let Some(msg_text) = text {
                     if !self.send_privmsg_and_echo(
                         &server_id,
@@ -836,13 +748,15 @@ impl App {
                     }
                     None => active_nick,
                 };
-                let mut raw_args = vec![target_name.clone()];
-                raw_args.extend(args.split_whitespace().map(str::to_string));
+                let summary = if args.is_empty() {
+                    format!("* Mode {target_name}")
+                } else {
+                    format!("* Mode {target_name} {}", args.join(" "))
+                };
+                let mut raw_args = vec![target_name];
+                raw_args.extend(args);
                 if self.send_irc(&server_id, Command::Raw("MODE".to_string(), raw_args)) {
-                    self.push_system(
-                        self.active_buffer,
-                        format!("* Mode {target_name} {args}").trim_end().to_string(),
-                    );
+                    self.push_system(self.active_buffer, summary);
                 }
             }
             UserCommand::Away(reason) => {
@@ -997,8 +911,7 @@ impl App {
                     self.active_buffer = self.buffers.len() - 1;
                 }
                 if !self.buffers.is_empty() {
-                    self.buffers[self.active_buffer].unread = false;
-                    self.buffers[self.active_buffer].highlight = false;
+                    self.buffers[self.active_buffer].mark_read();
                 }
             }
             UserCommand::Quit(reason) => {
