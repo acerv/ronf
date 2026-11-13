@@ -115,6 +115,7 @@ impl App {
         match event {
             ServerEvent::Connected { server_id, sender, nick } => {
                 self.reset_server_channels(&server_id);
+                self.set_auto_joined(&server_id, false);
                 self.set_nick(&server_id, nick);
                 self.set_sender(&server_id, Some(sender));
                 if let Some(idx) = self.find_server_buffer(&server_id) {
@@ -123,6 +124,7 @@ impl App {
             }
             ServerEvent::Error { server_id, error } => {
                 self.set_sender(&server_id, None);
+                self.set_auto_joined(&server_id, false);
                 self.reset_server_channels(&server_id);
                 if let Some(idx) = self.find_server_buffer(&server_id) {
                     self.push_error(idx, error);
@@ -592,7 +594,10 @@ impl App {
                 if let Some(srv_idx) = self.find_server_buffer(server_id) {
                     self.push_system(srv_idx, trailing_text(&args));
                 }
-                if matches!(resp, Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD) {
+                if matches!(resp, Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD)
+                    && !self.is_auto_joined(server_id)
+                {
+                    self.set_auto_joined(server_id, true);
                     self.join_server_channels(server_id);
                 }
             }

@@ -25,6 +25,7 @@ pub struct ServerState {
     pub history_limit: usize,
     pub sender: Option<Sender>,
     pub reconnect_notify: Arc<Notify>,
+    pub auto_joined: bool,
 }
 
 pub struct App {
@@ -60,6 +61,7 @@ impl App {
                     history_limit: limit,
                     sender: None,
                     reconnect_notify: Arc::new(Notify::new()),
+                    auto_joined: false,
                 },
             );
 
@@ -195,10 +197,21 @@ impl App {
                     history_limit: DEFAULT_HISTORY_LIMIT,
                     sender: None,
                     reconnect_notify: Arc::new(Notify::new()),
+                    auto_joined: false,
                 },
             );
             String::new()
         }
+    }
+
+    pub(crate) fn set_auto_joined(&mut self, server_id: &str, joined: bool) {
+        if let Some(srv) = self.server_state_mut(server_id) {
+            srv.auto_joined = joined;
+        }
+    }
+
+    pub(crate) fn is_auto_joined(&self, server_id: &str) -> bool {
+        self.server_state(server_id).is_some_and(|s| s.auto_joined)
     }
 
     pub(crate) fn set_sender(&mut self, server_id: &str, sender: Option<Sender>) -> Option<Sender> {
@@ -214,6 +227,7 @@ impl App {
                         history_limit: DEFAULT_HISTORY_LIMIT,
                         sender: Some(s),
                         reconnect_notify: Arc::new(Notify::new()),
+                        auto_joined: false,
                     },
                 );
             }
@@ -895,6 +909,7 @@ impl App {
                 if let Some(sender) = self.set_sender(&server_id, None) {
                     let _ = sender.send(Command::QUIT(Some("Reconnecting...".to_string())));
                 }
+                self.set_auto_joined(&server_id, false);
                 if let Some(notify) = self.reconnect_notify_for(&server_id) {
                     notify.notify_one();
                 }
@@ -2465,6 +2480,49 @@ mod tests {
         assert_eq!(
             app.buffers[srv_idx].messages.last().unwrap().content,
             "* Mode irc_user"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_joins_channels_only_once_per_connection() {
+        let (_, messages) = capture_outgoing(|app| {
+            let motd_end = Message {
+                tags: None,
+                prefix: None,
+                command: Command::Response(
+                    Response::RPL_ENDOFMOTD,
+                    vec!["irc_user".into(), "End of /MOTD command.".into()],
+                ),
+            };
+            app.handle_irc_message("libera", motd_end.clone());
+            // Subsequent /motd responses must not re-join channels.
+            app.handle_irc_message("libera", motd_end.clone());
+
+            // A new connection resets auto_joined so channels join again.
+            if let Some(sender) = app.sender_for("libera").cloned() {
+                app.handle_server_event(crate::irc_handler::ServerEvent::Connected {
+                    server_id: "libera".into(),
+                    sender,
+                    nick: "irc_user".into(),
+                });
+                app.handle_irc_message("libera", motd_end);
+            }
+        })
+        .await;
+
+        let joins: Vec<_> = messages
+            .into_iter()
+            .filter(|m| matches!(m.command, Command::JOIN(_, _, _)))
+            .map(|m| m.command)
+            .collect();
+        assert_eq!(
+            joins,
+            vec![
+                Command::JOIN("#linux".into(), None, None),
+                Command::JOIN("#rust".into(), None, None),
+                Command::JOIN("#linux".into(), None, None),
+                Command::JOIN("#rust".into(), None, None),
+            ]
         );
     }
 }
