@@ -25,6 +25,7 @@ impl InputState {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor_pos = self.text.len();
+        self.tab_state = None;
     }
 
     pub fn cancel(&mut self) {
@@ -38,6 +39,7 @@ impl InputState {
     pub fn clear_line(&mut self) {
         self.text.clear();
         self.cursor_pos = 0;
+        self.tab_state = None;
     }
 
     pub fn move_home(&mut self) {
@@ -193,6 +195,7 @@ impl InputState {
         self.cursor_pos = 0;
         self.history_index = None;
         self.saved_draft.clear();
+        self.tab_state = None;
 
         if line.trim().is_empty() {
             return None;
@@ -220,4 +223,33 @@ fn next_char_boundary(s: &str, byte_idx: usize) -> usize {
     iter.next()
         .map(|(offset, _)| byte_idx + offset)
         .unwrap_or(s.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clears_tab_state_when_text_is_replaced_or_submitted() {
+        let users = vec!["alice".to_string(), "alex".to_string()];
+        let mut input = InputState::default();
+
+        input.set_text("hello al");
+        input.complete_tab(&users);
+        assert!(input.tab_state.is_some());
+
+        input.take_submitted();
+        assert!(input.tab_state.is_none());
+        input.complete_tab(&users);
+
+        input.set_text("hello al");
+        input.complete_tab(&users);
+        input.set_text("a");
+        assert!(input.tab_state.is_none());
+        input.complete_tab(&users);
+        assert_eq!(input.text, "alice: ");
+
+        input.clear_line();
+        assert!(input.tab_state.is_none());
+    }
 }
