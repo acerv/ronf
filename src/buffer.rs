@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::HashSet;
-
 use chrono::Local;
 use irc::proto::{ChannelMode, Mode};
 
@@ -104,20 +102,27 @@ impl Buffer {
 
     pub fn sort_users(&mut self) {
         for user in &mut self.users {
-            let (prefixes, raw) = extract_user_prefixes(user);
-            *user = format!("{prefixes}{raw}");
+            let raw = user.trim_start_matches(is_role_prefix);
+            let prefix_len = user.len() - raw.len();
+            if prefix_len > 1 {
+                let (prefixes, raw) = extract_user_prefixes(user);
+                *user = format!("{prefixes}{raw}");
+            }
         }
+        self.users.retain(|u| !strip_user_prefix(u).1.is_empty());
+        self.users.sort_by(|a, b| {
+            let (pref_a, nick_a) = strip_user_prefix(a);
+            let (pref_b, nick_b) = strip_user_prefix(b);
+            cmp_ascii_ignore_case(nick_a, nick_b).then_with(|| role_rank(pref_a).cmp(&role_rank(pref_b)))
+        });
+        self.users
+            .dedup_by(|a, b| strip_user_prefix(a).1.eq_ignore_ascii_case(strip_user_prefix(b).1));
         self.users.sort_by(|a, b| {
             let (pref_a, nick_a) = strip_user_prefix(a);
             let (pref_b, nick_b) = strip_user_prefix(b);
             role_rank(pref_a)
                 .cmp(&role_rank(pref_b))
-                .then_with(|| nick_a.to_ascii_lowercase().cmp(&nick_b.to_ascii_lowercase()))
-        });
-        let mut seen = HashSet::with_capacity(self.users.len());
-        self.users.retain(|u| {
-            let (_, nick) = strip_user_prefix(u);
-            !nick.is_empty() && seen.insert(nick.to_ascii_lowercase())
+                .then_with(|| cmp_ascii_ignore_case(nick_a, nick_b))
         });
         self.clamp_user_scroll();
     }
@@ -206,24 +211,35 @@ pub fn is_channel_name(name: &str) -> bool {
     name.starts_with(['#', '&', '!', '+']) && name.len() > 1
 }
 
+fn is_nick_special(b: u8) -> bool {
+    matches!(
+        b,
+        b'_' | b'[' | b']' | b'{' | b'}' | b'\\' | b'|' | b'^' | b'`'
+    )
+}
+
+fn is_nick_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || is_nick_special(b) || b == b'-'
+}
+
+fn cmp_ascii_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
 pub fn is_valid_nick(nick: &str) -> bool {
     let mut bytes = nick.bytes();
     let Some(first) = bytes.next() else {
         return false;
     };
-    let is_special = |b: u8| {
-        matches!(
-            b,
-            b'_' | b'[' | b']' | b'{' | b'}' | b'\\' | b'|' | b'^' | b'`'
-        )
-    };
-    if !(first.is_ascii_alphabetic() || is_special(first)) {
+    if !(first.is_ascii_alphabetic() || is_nick_special(first)) {
         return false;
     }
-    bytes.all(|b| b.is_ascii_alphanumeric() || is_special(b) || b == b'-')
+    bytes.all(is_nick_byte)
 }
 
-fn is_role_prefix(ch: char) -> bool {
+pub fn is_role_prefix(ch: char) -> bool {
     matches!(ch, '~' | '&' | '@' | '%' | '+')
 }
 
@@ -271,23 +287,20 @@ pub fn contains_nick_mention(text: &str, nick: &str) -> bool {
         return false;
     }
 
-    let text_lower = text.to_ascii_lowercase();
-    let nick_lower = nick_clean.to_ascii_lowercase();
-    let is_nick_char = |b: u8| {
-        b.is_ascii_alphanumeric()
-            || matches!(
-                b,
-                b'_' | b'-' | b'[' | b']' | b'{' | b'}' | b'\\' | b'|' | b'^' | b'`'
-            )
-    };
+    let text_bytes = text.as_bytes();
+    let nick_bytes = nick_clean.as_bytes();
+    let nick_len = nick_bytes.len();
+    if text_bytes.len() < nick_len {
+        return false;
+    }
 
-    let text_bytes = text_lower.as_bytes();
-    let nick_len = nick_lower.len();
-
-    for (pos, _) in text_lower.match_indices(&nick_lower) {
-        let before_ok = pos == 0 || !is_nick_char(text_bytes[pos - 1]);
+    for (pos, window) in text_bytes.windows(nick_len).enumerate() {
+        if !window.eq_ignore_ascii_case(nick_bytes) {
+            continue;
+        }
+        let before_ok = pos == 0 || !is_nick_byte(text_bytes[pos - 1]);
         let after_pos = pos + nick_len;
-        let after_ok = after_pos >= text_bytes.len() || !is_nick_char(text_bytes[after_pos]);
+        let after_ok = after_pos >= text_bytes.len() || !is_nick_byte(text_bytes[after_pos]);
         if before_ok && after_ok {
             return true;
         }

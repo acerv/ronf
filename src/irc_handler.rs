@@ -5,8 +5,8 @@ use irc::proto::{Command, Message, Prefix, Response};
 
 use crate::app::App;
 use crate::buffer::{
-    contains_nick_mention, is_channel_name, is_valid_nick, Buffer, BufferKind, ChatLine,
-    LineKind,
+    contains_nick_mention, is_channel_name, is_role_prefix, is_valid_nick, Buffer, BufferKind,
+    ChatLine, LineKind,
 };
 use crate::log_store::rename_buffer_log;
 
@@ -57,8 +57,8 @@ impl App {
                 }
                 fallback = Some(candidate);
             }
-            match candidate.as_bytes().first() {
-                Some(b'~' | b'&' | b'@' | b'%' | b'+') => candidate = &candidate[1..],
+            match candidate.chars().next() {
+                Some(ch) if is_role_prefix(ch) => candidate = &candidate[ch.len_utf8()..],
                 _ => return fallback,
             }
         }
