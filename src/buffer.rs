@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::HashSet;
+
 use chrono::Local;
 use irc::proto::{ChannelMode, Mode};
 
@@ -119,10 +121,10 @@ impl Buffer {
                 .cmp(&role_rank(pref_b))
                 .then_with(|| nick_a.to_ascii_lowercase().cmp(&nick_b.to_ascii_lowercase()))
         });
-        self.users.dedup_by(|a, b| {
-            let (_, nick_a) = strip_user_prefix(a);
-            let (_, nick_b) = strip_user_prefix(b);
-            nick_a.eq_ignore_ascii_case(nick_b)
+        let mut seen = HashSet::with_capacity(self.users.len());
+        self.users.retain(|u| {
+            let (_, nick) = strip_user_prefix(u);
+            !nick.is_empty() && seen.insert(nick.to_ascii_lowercase())
         });
         self.clamp_user_scroll();
     }
@@ -299,4 +301,24 @@ pub fn contains_nick_mention(text: &str, nick: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sort_users_deduplicates_non_adjacent_roles_keeping_highest_rank() {
+        let mut buf = Buffer::new("libera", "#rust", BufferKind::Channel);
+        buf.users = vec![
+            "bob".into(),
+            "+charlie".into(),
+            "@BOB".into(),
+            "charlie".into(),
+            "@alice".into(),
+            "+alice".into(),
+        ];
+        buf.sort_users();
+        assert_eq!(buf.users, vec!["@alice", "@BOB", "+charlie"]);
+    }
 }
