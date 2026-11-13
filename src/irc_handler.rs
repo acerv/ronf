@@ -678,16 +678,25 @@ fn build_ctcp_reply(ctcp: &str) -> Option<String> {
 
 #[cfg(not(test))]
 fn send_desktop_notification(summary: &str, body: &str) {
-    let summary = summary.to_string();
-    let body = body.to_string();
-    std::thread::spawn(move || {
-        let _ = notify_rust::Notification::new()
-            .appname("ronf")
-            .summary(&summary)
-            .body(&body)
-            .icon("user-available")
-            .show();
+    use std::sync::mpsc::{self, SyncSender};
+    use std::sync::OnceLock;
+
+    static TX: OnceLock<SyncSender<(String, String)>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<(String, String)>(16);
+        std::thread::spawn(move || {
+            while let Ok((summary, body)) = rx.recv() {
+                let _ = notify_rust::Notification::new()
+                    .appname("ronf")
+                    .summary(&summary)
+                    .body(&body)
+                    .icon("user-available")
+                    .show();
+            }
+        });
+        tx
     });
+    let _ = tx.try_send((summary.to_string(), body.to_string()));
 }
 
 #[cfg(test)]
