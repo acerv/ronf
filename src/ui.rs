@@ -415,10 +415,44 @@ fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
     Line::from(spans)
 }
 
+fn fit_input_prompt(nick: &str, server_id: &str, buf_name: &str, max_width: usize) -> String {
+    let label = format!("{nick} @ {server_id}/{buf_name}");
+    let full = format!(" [{label}] > ");
+    if UnicodeWidthStr::width(full.as_str()) <= max_width {
+        return full;
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return ">".to_string();
+    }
+    if max_width < 7 {
+        return "> ".to_string();
+    }
+    let budget = max_width - 7;
+    let mut trimmed = String::new();
+    let mut used = 0usize;
+    for ch in label.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        trimmed.push(ch);
+        used += w;
+    }
+    format!(" [{trimmed}…] > ")
+}
+
 fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let buf = app.active_buf();
     let nick = app.active_nick();
-    let prompt = format!(" [{nick} @ {}/{}] > ", buf.server_id, buf.name);
+    let min_input_width = ((area.width as usize) / 2).clamp(1, 12);
+    let max_prompt_width = (area.width as usize).saturating_sub(min_input_width);
+    let prompt = fit_input_prompt(nick, &buf.server_id, &buf.name, max_prompt_width);
     let prompt_width = UnicodeWidthStr::width(prompt.as_str());
 
     let avail_width = (area.width as usize).saturating_sub(prompt_width);
@@ -978,5 +1012,37 @@ mod tests {
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|f| draw(f, &app)).unwrap();
         }
+    }
+
+    #[test]
+    fn input_bar_keeps_typed_text_visible_when_prompt_is_long() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let toml = r##"
+            default_nickname = "my_nickname"
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#kernelnewbies"]
+        "##;
+        let cfg = AppConfig::from_toml_str(toml).unwrap();
+        let mut app = App::from_config(&cfg);
+        let idx = app.find_buffer("libera", "#kernelnewbies").unwrap();
+        app.select_buffer(idx);
+        app.set_terminal_size(80, 24);
+        app.input.set_text("hello world");
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let input_row: String = (24..60)
+            .map(|x| buf[(x, 23)].symbol())
+            .collect();
+        assert!(
+            input_row.contains("hello world"),
+            "Expected typed text to remain visible in input row: {input_row:?}"
+        );
     }
 }
