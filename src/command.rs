@@ -281,21 +281,7 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
                 })
             } else {
                 let (first, rem) = split_first_arg(rest)?;
-                if first.starts_with(['#', '&', '!']) {
-                    Some(UserCommand::Mode {
-                        target: Some(first),
-                        args: rem.unwrap_or_default(),
-                        channel_only: false,
-                    })
-                } else if first.starts_with(['+', '-'])
-                    && rem.as_deref().is_some_and(|r| r.starts_with(['+', '-']))
-                {
-                    Some(UserCommand::Mode {
-                        target: Some(first),
-                        args: rem.unwrap_or_default(),
-                        channel_only: false,
-                    })
-                } else if first.starts_with(['+', '-']) {
+                if first.starts_with(['+', '-']) {
                     Some(UserCommand::Mode {
                         target: None,
                         args: rest.to_string(),
@@ -404,6 +390,22 @@ mod tests {
             Some(UserCommand::Mode {
                 target: None,
                 args: "+i".to_string(),
+                channel_only: false,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/mode +m -t"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: "+m -t".to_string(),
+                channel_only: false,
+            })
+        );
+        assert_eq!(
+            parse_user_command("/mode +i +w"),
+            Some(UserCommand::Mode {
+                target: None,
+                args: "+i +w".to_string(),
                 channel_only: false,
             })
         );
