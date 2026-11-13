@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use crate::buffer::{is_channel_name, Buffer, BufferKind, ChatLine, LineKind, Timestamp};
 
@@ -130,42 +129,13 @@ fn sanitize_single_line(s: &str) -> String {
         .collect()
 }
 
-fn log_file_cache() -> &'static Mutex<BTreeMap<PathBuf, File>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, File>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-const MAX_CACHED_LOG_FILES: usize = 64;
-
-fn write_log_entry(path: PathBuf, entry: &str) {
-    let mut cache = match log_file_cache().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if !cache.contains_key(&path) {
-        if cache.len() >= MAX_CACHED_LOG_FILES {
-            cache.clear();
-        }
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
-            cache.insert(path.clone(), file);
-        }
+fn write_log_entry(path: &Path, entry: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
     }
-    if let Some(file) = cache.get_mut(&path) {
-        if file.write_all(entry.as_bytes()).is_err() {
-            cache.remove(&path);
-        }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(entry.as_bytes());
     }
-}
-
-fn evict_cached_log_file(path: &Path) {
-    let mut cache = match log_file_cache().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    cache.remove(path);
 }
 
 pub(crate) fn rename_buffer_log(
@@ -183,8 +153,6 @@ pub(crate) fn rename_buffer_log(
     if old_path == new_path || !old_path.exists() {
         return;
     }
-    evict_cached_log_file(&old_path);
-    evict_cached_log_file(&new_path);
 
     if !new_path.exists() {
         if let Some(parent) = new_path.parent() {
@@ -225,7 +193,7 @@ pub(crate) fn append_buffer_log(base_dir: &Path, server_id: &str, buf_name: &str
             format!("[{}] {}\n", line.timestamp, clean_content)
         }
     };
-    write_log_entry(path, &formatted);
+    write_log_entry(&path, &formatted);
 }
 
 fn parse_log_line(raw: &str) -> Option<ChatLine> {
@@ -258,37 +226,103 @@ fn parse_log_line(raw: &str) -> Option<ChatLine> {
     }
 }
 
+fn load_lines_backwards_with_chunk(
+    file: &mut File,
+    end: usize,
+    limit: usize,
+    chunk_size: usize,
+) -> (Vec<ChatLine>, usize) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut pos = end;
+    let mut trailing: Vec<u8> = Vec::new();
+    let mut batch = Vec::with_capacity(limit);
+
+    while pos > 0 {
+        let start = pos.saturating_sub(chunk_size);
+        let to_read = pos - start;
+        if file.seek(SeekFrom::Start(start as u64)).is_err() {
+            break;
+        }
+        let mut buf = vec![0u8; to_read];
+        if file.read_exact(&mut buf).is_err() {
+            break;
+        }
+        if !trailing.is_empty() {
+            buf.extend_from_slice(&trailing);
+            trailing.clear();
+        }
+
+        let (slice, slice_file_offset) = if start > 0 {
+            if let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                trailing = buf[..nl].to_vec();
+                (&buf[nl + 1..], start + nl + 1)
+            } else {
+                trailing = buf;
+                pos = start;
+                continue;
+            }
+        } else {
+            (buf.as_slice(), 0)
+        };
+
+        let mut end_idx = slice.len();
+        if end_idx > 0 && slice[end_idx - 1] == b'\n' {
+            end_idx -= 1;
+        }
+        while end_idx > 0 {
+            let line_start = slice[..end_idx]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let mut raw_line = &slice[line_start..end_idx];
+            if raw_line.last() == Some(&b'\r') {
+                raw_line = &raw_line[..raw_line.len() - 1];
+            }
+            if let Ok(line_str) = std::str::from_utf8(raw_line) {
+                if let Some(parsed) = parse_log_line(line_str) {
+                    batch.push(parsed);
+                    if batch.len() == limit {
+                        return (batch, slice_file_offset + line_start);
+                    }
+                }
+            }
+            if line_start == 0 {
+                break;
+            }
+            end_idx = line_start - 1;
+        }
+
+        pos = start;
+    }
+
+    (batch, 0)
+}
+
 pub(crate) fn load_more_buffer_history(base_dir: &Path, buf: &mut Buffer, limit: usize) -> usize {
+    const CHUNK_SIZE: usize = 8192;
+
     if buf.kind == BufferKind::Server || limit == 0 || buf.history_cursor == Some(0) {
         return 0;
     }
     let path = buffer_log_path(base_dir, &buf.server_id, &buf.name);
-    let Ok(content) = fs::read_to_string(path) else {
+    let Ok(mut file) = File::open(path) else {
         buf.history_cursor = Some(0);
         return 0;
     };
-    let all_lines: Vec<&str> = content.lines().collect();
-    let end = buf
-        .history_cursor
-        .unwrap_or(all_lines.len())
-        .min(all_lines.len());
+    let Ok(meta) = file.metadata() else {
+        buf.history_cursor = Some(0);
+        return 0;
+    };
+    let file_len = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+    let end = buf.history_cursor.unwrap_or(file_len).min(file_len);
     if end == 0 {
         buf.history_cursor = Some(0);
         return 0;
     }
 
-    let mut batch = Vec::with_capacity(limit.min(end));
-    let mut new_cursor = 0usize;
-    for idx in (0..end).rev() {
-        if let Some(line) = parse_log_line(all_lines[idx]) {
-            batch.push(line);
-            if batch.len() == limit {
-                new_cursor = idx;
-                break;
-            }
-        }
-    }
-
+    let (batch, new_cursor) = load_lines_backwards_with_chunk(&mut file, end, limit, CHUNK_SIZE);
     buf.history_cursor = Some(new_cursor);
     let loaded = batch.len();
     for line in batch {
@@ -381,5 +415,35 @@ mod tests {
                 kind: LineKind::Action,
             })
         );
+    }
+
+    #[test]
+    fn loads_history_backwards_across_small_chunks_and_utf8_boundaries() {
+        let tmp_path =
+            std::env::temp_dir().join(format!("ronf_test_chunked_log_{}.log", std::process::id()));
+        let contents = "\
+[12:00:01] <alice> first 🦀 message\n\
+[12:00:02] <bob> second line\n\
+[12:00:03] * alice waves 👋\n\
+[12:00:04] <bob> fourth line\n";
+        fs::write(&tmp_path, contents).unwrap();
+
+        let mut file = File::open(&tmp_path).unwrap();
+        let len = contents.len();
+        let (batch1, cursor1) = load_lines_backwards_with_chunk(&mut file, len, 2, 13);
+        assert_eq!(
+            batch1.iter().map(|l| l.content.as_str()).collect::<Vec<_>>(),
+            vec!["fourth line", "waves 👋"]
+        );
+        assert!(cursor1 > 0);
+
+        let (batch2, cursor2) = load_lines_backwards_with_chunk(&mut file, cursor1, 2, 13);
+        assert_eq!(
+            batch2.iter().map(|l| l.content.as_str()).collect::<Vec<_>>(),
+            vec!["second line", "first 🦀 message"]
+        );
+        assert_eq!(cursor2, 0);
+
+        let _ = fs::remove_file(&tmp_path);
     }
 }
