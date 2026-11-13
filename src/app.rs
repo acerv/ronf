@@ -124,23 +124,14 @@ impl App {
         self.help_scroll = self.help_scroll.min(crate::ui::help_max_scroll(height));
     }
 
-    /// Number of rows available to the chat pane (input bar and separator
-    /// take the last two rows of the center column).
+    /// Number of rows available to the chat pane.
     pub fn chat_viewport_height(&self) -> usize {
-        (self.term_height as usize).saturating_sub(2).max(1)
-    }
-
-    /// Width in columns of the padded chat area.
-    pub fn chat_viewport_width(&self) -> usize {
-        (self.term_width as usize)
-            .saturating_sub(24 + 20)
-            .saturating_sub(2)
-            .max(1)
+        crate::ui::chat_viewport_size(self.term_width, self.term_height).1
     }
 
     pub fn active_max_scroll(&self) -> usize {
-        let viewport_rows = self.chat_viewport_height();
-        let width = self.chat_viewport_width();
+        let (width, viewport_rows) =
+            crate::ui::chat_viewport_size(self.term_width, self.term_height);
         let my_nick = self.active_nick();
         crate::ui::compute_max_scroll(self.active_buf(), my_nick, width, viewport_rows)
     }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
@@ -82,14 +83,29 @@ pub fn build_tree_rows(app: &App) -> Vec<TreeRow<'_>> {
     rows
 }
 
+pub const TREE_SIDEBAR_WIDTH: u16 = 24;
+pub const USERS_SIDEBAR_WIDTH: u16 = 20;
+const CHAT_BOTTOM_ROWS: u16 = 2;
+
+pub fn chat_viewport_size(term_width: u16, term_height: u16) -> (usize, usize) {
+    let center_width = term_width.saturating_sub(TREE_SIDEBAR_WIDTH + USERS_SIDEBAR_WIDTH);
+    let padded_width = if center_width > 2 {
+        center_width - 2
+    } else {
+        center_width
+    };
+    let height = term_height.saturating_sub(CHAT_BOTTOM_ROWS);
+    (padded_width.max(1) as usize, height.max(1) as usize)
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(24),
+            Constraint::Length(TREE_SIDEBAR_WIDTH),
             Constraint::Min(1),
-            Constraint::Length(20),
+            Constraint::Length(USERS_SIDEBAR_WIDTH),
         ])
         .split(area);
 
@@ -210,11 +226,13 @@ pub fn compute_max_scroll(
         return 0;
     }
     let target = viewport_rows.max(1);
+    let width = width.max(1);
     let mut rows = 0usize;
     let mut top_messages = 0usize;
+    let mut scratch = VecDeque::new();
     for msg in &buf.messages {
         let formatted = format_chat_line(msg, my_nick);
-        rows += wrapped_line_height(&formatted, width.max(1));
+        rows += wrapped_line_height_with_scratch(&formatted, width, &mut scratch);
         top_messages += 1;
         if rows >= target {
             break;
@@ -249,12 +267,13 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
 
     let mut acc_rows = 0usize;
     let mut visible_lines = Vec::with_capacity(inner_height.min(end));
+    let mut scratch = VecDeque::new();
     for msg in buf.messages.range(..end).rev() {
         if acc_rows >= inner_height {
             break;
         }
         let formatted = format_chat_line(msg, my_nick);
-        acc_rows += wrapped_line_height(&formatted, width);
+        acc_rows += wrapped_line_height_with_scratch(&formatted, width, &mut scratch);
         visible_lines.push(formatted);
     }
     visible_lines.reverse();
@@ -269,15 +288,26 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn wrapped_line_height(line: &Line, width: usize) -> usize {
+    wrapped_line_height_with_scratch(line, width, &mut VecDeque::new())
+}
+
+fn wrapped_line_height_with_scratch(
+    line: &Line,
+    width: usize,
+    pending_ws: &mut VecDeque<usize>,
+) -> usize {
     if width == 0 {
         return 1;
     }
+    if line.width() <= width {
+        return 1;
+    }
 
+    pending_ws.clear();
     let mut wrapped_lines = 0usize;
     let mut line_width = 0usize;
     let mut word_width = 0usize;
     let mut whitespace_width = 0usize;
-    let mut pending_ws: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
     let mut non_whitespace_previous = false;
     let mut has_any = false;
 
@@ -347,7 +377,7 @@ pub fn wrapped_line_height(line: &Line, width: usize) -> usize {
     wrapped_lines.max(1)
 }
 
-fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
+fn format_chat_line<'a>(line: &'a ChatLine, my_nick: &str) -> Line<'a> {
     let mut spans = vec![Span::styled(
         format!("[{}] ", line.timestamp),
         Style::default().fg(Color::Gray),
@@ -372,7 +402,7 @@ fn format_chat_line(line: &ChatLine, my_nick: &str) -> Line<'static> {
                 };
                 spans.push(Span::styled("<", Style::default().fg(Color::Gray)));
                 spans.push(Span::styled(
-                    sender.clone(),
+                    sender.as_str(),
                     Style::default().fg(n_color).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled("> ", Style::default().fg(Color::Gray)));
@@ -695,24 +725,30 @@ fn draw_help_popup(f: &mut Frame, app: &App) {
 
 /// Parses mIRC formatting codes (`\x02` bold, `\x1d` italic, `\x1f` underline,
 /// `\x0f` reset, and `\x03[FG[,BG]]` colors 00..15) into styled `ratatui` spans.
-pub fn parse_irc_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
+pub fn parse_irc_spans<'a>(text: &'a str, base_style: Style) -> Vec<Span<'a>> {
+    if !text
+        .bytes()
+        .any(|b| matches!(b, 0x02 | 0x03 | 0x0f | 0x11 | 0x16 | 0x1d | 0x1e | 0x1f))
+    {
+        return vec![Span::styled(text, base_style)];
+    }
+
     let mut spans = Vec::new();
     let mut current_style = base_style;
-    let mut current_text = String::new();
-
     let bytes = text.as_bytes();
     let mut i = 0;
+    let mut run_start = 0;
 
-    let flush = |spans: &mut Vec<Span<'static>>, buf: &mut String, style: Style| {
-        if !buf.is_empty() {
-            spans.push(Span::styled(std::mem::take(buf), style));
+    let flush = |spans: &mut Vec<Span<'a>>, start: usize, end: usize, style: Style| {
+        if start < end {
+            spans.push(Span::styled(&text[start..end], style));
         }
     };
 
     while i < bytes.len() {
         match bytes[i] {
             0x02 | 0x16 | 0x1d | 0x1e | 0x1f => {
-                flush(&mut spans, &mut current_text, current_style);
+                flush(&mut spans, run_start, i, current_style);
                 let modifier = match bytes[i] {
                     0x02 => Modifier::BOLD,
                     0x16 => Modifier::REVERSED,
@@ -722,17 +758,21 @@ pub fn parse_irc_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
                 };
                 current_style = toggle_modifier(current_style, modifier);
                 i += 1;
+                run_start = i;
             }
             0x11 => {
+                flush(&mut spans, run_start, i, current_style);
                 i += 1;
+                run_start = i;
             }
             0x0f => {
-                flush(&mut spans, &mut current_text, current_style);
+                flush(&mut spans, run_start, i, current_style);
                 current_style = base_style;
                 i += 1;
+                run_start = i;
             }
             0x03 => {
-                flush(&mut spans, &mut current_text, current_style);
+                flush(&mut spans, run_start, i, current_style);
                 i += 1;
                 let (fg_code, consumed_fg) = parse_two_digit_color(&bytes[i..]);
                 i += consumed_fg;
@@ -765,18 +805,17 @@ pub fn parse_irc_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
                     current_style.fg = base_style.fg;
                     current_style.bg = base_style.bg;
                 }
+                run_start = i;
             }
             _ => {
-                let ch = text[i..].chars().next().unwrap();
-                current_text.push(ch);
-                i += ch.len_utf8();
+                i += 1;
             }
         }
     }
 
-    flush(&mut spans, &mut current_text, current_style);
+    flush(&mut spans, run_start, bytes.len(), current_style);
     if spans.is_empty() {
-        spans.push(Span::styled(String::new(), base_style));
+        spans.push(Span::styled("", base_style));
     }
     spans
 }
