@@ -2525,4 +2525,97 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn dm_logs_are_case_insensitive_and_preserved_across_nick_rename() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ronf_test_dm_case_rename_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let toml = format!(
+            r##"
+            default_nickname = "irc_user"
+            log_dir = "{}"
+
+            [servers.libera]
+            server = "irc.libera.chat"
+            channels = ["#rust"]
+        "##,
+            tmp_dir.display()
+        );
+        let cfg = AppConfig::from_toml_str(&toml).unwrap();
+        let mut app = App::from_config(&cfg);
+
+        // Mixed-case incoming DM writes to lowercase log path.
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("Alice".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "hello from Alice".into()),
+            },
+        );
+        assert!(tmp_dir.join("libera").join("alice.log").exists());
+
+        // Peer renames nick and sends another message.
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("Alice".into(), "a".into(), "h".into())),
+                command: Command::NICK("Alice_AFK".into()),
+            },
+        );
+        app.handle_irc_message(
+            "libera",
+            Message {
+                tags: None,
+                prefix: Some(Prefix::Nickname("Alice_AFK".into(), "a".into(), "h".into())),
+                command: Command::PRIVMSG("irc_user".into(), "still here".into()),
+            },
+        );
+
+        // Restarting loads a single DM buffer with both messages and allows /query with different case.
+        let mut app2 = App::from_config(&cfg);
+        let dm_idx = app2
+            .find_buffer("libera", "alice_afk")
+            .expect("renamed DM restored");
+        assert!(app2.find_buffer("libera", "alice").is_none());
+        assert_eq!(
+            app2.buffers[dm_idx]
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hello from Alice", "still here"]
+        );
+
+        // Legacy mixed-case duplicate files on disk do not produce duplicate DM buffers.
+        fs::write(
+            tmp_dir.join("libera").join("Alice_AFK.log"),
+            "[12:00:00] <Alice_AFK> legacy\n",
+        )
+        .unwrap();
+        let app3 = App::from_config(&cfg);
+        let count = app3
+            .buffers
+            .iter()
+            .filter(|b| b.server_id == "libera" && b.name.eq_ignore_ascii_case("alice_afk"))
+            .count();
+        assert_eq!(count, 1);
+
+        // /query with different case finds the same log file.
+        app2.select_buffer(dm_idx);
+        app2.execute_user_command(UserCommand::Close);
+        let mut app4 = App::from_config(&cfg);
+        assert!(app4.find_buffer("libera", "alice_afk").is_none());
+        app4.execute_user_command(UserCommand::Query {
+            target: "ALICE_AFK".into(),
+            text: None,
+        });
+        let reopened = app4.find_buffer("libera", "alice_afk").unwrap();
+        assert_eq!(app4.buffers[reopened].messages.len(), 2);
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
 }

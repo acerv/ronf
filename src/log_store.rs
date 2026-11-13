@@ -47,12 +47,40 @@ fn percent_decode(s: &str) -> String {
 }
 
 fn server_log_dir(base_dir: &Path, server_id: &str) -> PathBuf {
-    base_dir.join(sanitize_log_component(server_id, false))
+    let canonical = base_dir.join(sanitize_log_component(&server_id.to_ascii_lowercase(), false));
+    if canonical.exists() {
+        return canonical;
+    }
+    let legacy = base_dir.join(sanitize_log_component(server_id, false));
+    if legacy.exists() {
+        legacy
+    } else {
+        canonical
+    }
 }
 
 fn buffer_log_path(base_dir: &Path, server_id: &str, buf_name: &str) -> PathBuf {
-    let safe_buf = sanitize_log_component(buf_name, true);
-    server_log_dir(base_dir, server_id).join(format!("{safe_buf}.log"))
+    let srv_dir = server_log_dir(base_dir, server_id);
+    let safe_buf = sanitize_log_component(&buf_name.to_ascii_lowercase(), true);
+    let canonical = srv_dir.join(format!("{safe_buf}.log"));
+    if canonical.exists() {
+        return canonical;
+    }
+    if let Ok(entries) = fs::read_dir(&srv_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("log") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if percent_decode(stem).eq_ignore_ascii_case(buf_name) {
+                return path;
+            }
+        }
+    }
+    canonical
 }
 
 fn closed_dms_path(base_dir: &Path, server_id: &str) -> PathBuf {
@@ -128,6 +156,53 @@ fn write_log_entry(path: PathBuf, entry: &str) {
     if let Some(file) = cache.get_mut(&path) {
         if file.write_all(entry.as_bytes()).is_err() {
             cache.remove(&path);
+        }
+    }
+}
+
+fn evict_cached_log_file(path: &Path) {
+    let mut cache = match log_file_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache.remove(path);
+}
+
+pub(crate) fn rename_buffer_log(
+    base_dir: &Path,
+    server_id: &str,
+    old_name: &str,
+    new_name: &str,
+) {
+    set_dm_closed(base_dir, server_id, new_name, false);
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return;
+    }
+    let old_path = buffer_log_path(base_dir, server_id, old_name);
+    let new_path = buffer_log_path(base_dir, server_id, new_name);
+    if old_path == new_path || !old_path.exists() {
+        return;
+    }
+    evict_cached_log_file(&old_path);
+    evict_cached_log_file(&new_path);
+
+    if !new_path.exists() {
+        if let Some(parent) = new_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::rename(&old_path, &new_path);
+        return;
+    }
+
+    if let Ok(old_contents) = fs::read_to_string(&old_path) {
+        if !old_contents.is_empty() {
+            if let Ok(mut dst) = OpenOptions::new().create(true).append(true).open(&new_path) {
+                if dst.write_all(old_contents.as_bytes()).is_ok() {
+                    let _ = fs::remove_file(&old_path);
+                }
+            }
+        } else {
+            let _ = fs::remove_file(&old_path);
         }
     }
 }
@@ -265,7 +340,12 @@ pub(crate) fn discover_dm_buffers(
         })
         .collect();
 
-    dm_names.sort_by_key(|a| a.to_ascii_lowercase());
+    dm_names.sort_by(|a, b| {
+        a.to_ascii_lowercase()
+            .cmp(&b.to_ascii_lowercase())
+            .then_with(|| (a != &a.to_ascii_lowercase()).cmp(&(b != &b.to_ascii_lowercase())))
+    });
+    dm_names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
 
     let mut dm_buffers = Vec::new();
     for name in dm_names {

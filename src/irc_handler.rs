@@ -8,6 +8,7 @@ use crate::buffer::{
     contains_nick_mention, is_channel_name, is_valid_nick, Buffer, BufferKind, ChatLine,
     LineKind,
 };
+use crate::log_store::rename_buffer_log;
 
 #[derive(Debug)]
 pub enum ServerEvent {
@@ -362,13 +363,15 @@ impl App {
                             && b.server_id.eq_ignore_ascii_case(server_id)
                             && b.name.eq_ignore_ascii_case(&new_nick)
                     });
+                    let mut renamed_dm_log: Option<(String, String)> = None;
                     let affected = self.affected_server_buffers(server_id, |buf| {
                         let renamed_in_chan = buf.rename_user(&old_nick, &new_nick);
                         let renamed_dm = if buf.kind == BufferKind::DirectMessage
                             && buf.name.eq_ignore_ascii_case(&old_nick)
                         {
                             if !new_dm_exists || old_nick.eq_ignore_ascii_case(&new_nick) {
-                                buf.name = new_nick.clone();
+                                let prev = std::mem::replace(&mut buf.name, new_nick.clone());
+                                renamed_dm_log = Some((prev, new_nick.clone()));
                             }
                             true
                         } else {
@@ -376,6 +379,11 @@ impl App {
                         };
                         renamed_in_chan || renamed_dm
                     });
+                    if let (Some(ref dir), Some((prev_name, next_name))) =
+                        (&self.log_dir, renamed_dm_log)
+                    {
+                        rename_buffer_log(dir, server_id, &prev_name, &next_name);
+                    }
                     if is_self && affected.is_empty() {
                         let idx = self.target_buffer_for_server(server_id);
                         self.push_system(idx, format!("* {old_nick} is now known as {new_nick}"));
