@@ -551,10 +551,10 @@ impl App {
                     return;
                 }
                 KeyCode::PageDown => {
+                    let visible_rows = (self.term_height as usize).saturating_sub(1).max(1);
                     let buf = self.active_buf_mut();
-                    if buf.user_scroll_offset + 5 < buf.users.len() {
-                        buf.user_scroll_offset += 5;
-                    }
+                    let max_offset = buf.users.len().saturating_sub(visible_rows);
+                    buf.user_scroll_offset = buf.user_scroll_offset.saturating_add(5).min(max_offset);
                     return;
                 }
                 KeyCode::Char(c @ '1'..='9') => {
@@ -2617,5 +2617,20 @@ mod tests {
         assert_eq!(app4.buffers[reopened].messages.len(), 2);
 
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn alt_pagedown_scrolls_user_list_to_bottom_on_short_terminals() {
+        let mut app = test_app();
+        let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+        app.select_buffer(rust_idx);
+        app.set_terminal_height(4); // 1 header row + 3 user rows
+        app.buffers[rust_idx].users = (1..=5).map(|i| format!("user{i}")).collect();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::ALT));
+        assert_eq!(app.buffers[rust_idx].user_scroll_offset, 2);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT));
+        assert_eq!(app.buffers[rust_idx].user_scroll_offset, 0);
     }
 }
