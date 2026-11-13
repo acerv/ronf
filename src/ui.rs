@@ -508,10 +508,14 @@ pub fn format_user_list_entry(entry: &str) -> (String, Color) {
 }
 
 fn draw_users_sidebar(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let buf = app.active_buf();
     let count = buf.users.len();
+    let max_users = (area.height as usize).saturating_sub(1);
 
-    let mut items: Vec<ListItem> = Vec::with_capacity(count + 2);
+    let mut items: Vec<ListItem> = Vec::with_capacity(max_users.min(count) + 1);
     items.push(ListItem::new(Line::from(Span::styled(
         format!(" Users ({count})"),
         Style::default()
@@ -519,7 +523,7 @@ fn draw_users_sidebar(f: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     ))));
 
-    for entry in buf.users.iter().skip(buf.user_scroll_offset) {
+    for entry in buf.users.iter().skip(buf.user_scroll_offset).take(max_users) {
         let (label, color) = format_user_list_entry(entry);
         items.push(ListItem::new(Line::from(Span::styled(
             label,

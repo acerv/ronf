@@ -1923,8 +1923,9 @@ mod tests {
         let viewport = app.chat_viewport_height();
         for _ in 0..8 {
             app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+            let expected_max = app.active_max_scroll();
             let buf = &app.buffers[rust_idx];
-            assert_eq!(buf.scroll_offset, buf.max_scroll(viewport));
+            assert_eq!(buf.scroll_offset, expected_max);
             assert!(buf.messages.len() - buf.scroll_offset >= viewport);
         }
         assert_eq!(app.buffers[rust_idx].messages.len(), 4);
