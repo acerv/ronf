@@ -31,7 +31,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["/query"],
-        usage: "/query <nick>",
+        usage: "/query <nick> [text]",
         description: "Open direct message buffer",
     },
     CommandSpec {
@@ -61,7 +61,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["/invite"],
-        usage: "/invite <nick>",
+        usage: "/invite <nick> [chan]",
         description: "Invite user to channel",
     },
     CommandSpec {
@@ -76,7 +76,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["/voice", "/devoice"],
-        usage: "/voice / /devoice",
+        usage: "/voice /devoice <nick>",
         description: "Grant or revoke voice (+)",
     },
     CommandSpec {
