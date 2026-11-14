@@ -748,14 +748,41 @@ impl App {
                     }
                     None => active_nick,
                 };
-                let summary = if args.is_empty() {
-                    format!("* Mode {target_name}")
+                const MAX_MODES_PER_CMD: usize = 3;
+                let batches: Vec<Vec<String>> = if channel_only
+                    && args.len() > 1 + MAX_MODES_PER_CMD
+                {
+                    if let (Some(sign), Some(letter)) =
+                        (args[0].chars().next(), args[0].chars().nth(1))
+                    {
+                        args[1..]
+                            .chunks(MAX_MODES_PER_CMD)
+                            .map(|chunk| {
+                                let flags: String = std::iter::once(sign)
+                                    .chain(std::iter::repeat_n(letter, chunk.len()))
+                                    .collect();
+                                std::iter::once(flags)
+                                    .chain(chunk.iter().cloned())
+                                    .collect()
+                            })
+                            .collect()
+                    } else {
+                        vec![args]
+                    }
                 } else {
-                    format!("* Mode {target_name} {}", args.join(" "))
+                    vec![args]
                 };
-                let mut raw_args = vec![target_name];
-                raw_args.extend(args);
-                if self.send_irc(&server_id, Command::Raw("MODE".to_string(), raw_args)) {
+                for batch in batches {
+                    let summary = if batch.is_empty() {
+                        format!("* Mode {target_name}")
+                    } else {
+                        format!("* Mode {target_name} {}", batch.join(" "))
+                    };
+                    let mut raw_args = vec![target_name.clone()];
+                    raw_args.extend(batch);
+                    if !self.send_irc(&server_id, Command::Raw("MODE".to_string(), raw_args)) {
+                        break;
+                    }
                     self.push_system(self.active_buffer, summary);
                 }
             }
@@ -2385,6 +2412,45 @@ mod tests {
         assert_eq!(
             app.buffers[srv_idx].messages.back().unwrap().content,
             "* Mode irc_user"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunks_multi_target_channel_modes() {
+        let (_, messages) = capture_outgoing(|app| {
+            let rust_idx = app.find_buffer("libera", "#rust").unwrap();
+            app.select_buffer(rust_idx);
+            let cmd = crate::command::parse_user_command("/op a b c d e").unwrap();
+            app.execute_user_command(cmd);
+        })
+        .await;
+
+        let modes: Vec<_> = messages
+            .into_iter()
+            .filter_map(|m| match m.command {
+                Command::ChannelMODE(chan, args) => Some((chan, args)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            modes,
+            vec![
+                (
+                    "#rust".to_string(),
+                    vec![
+                        Mode::Plus(ChannelMode::Oper, Some("a".into())),
+                        Mode::Plus(ChannelMode::Oper, Some("b".into())),
+                        Mode::Plus(ChannelMode::Oper, Some("c".into())),
+                    ],
+                ),
+                (
+                    "#rust".to_string(),
+                    vec![
+                        Mode::Plus(ChannelMode::Oper, Some("d".into())),
+                        Mode::Plus(ChannelMode::Oper, Some("e".into())),
+                    ],
+                ),
+            ]
         );
     }
 
