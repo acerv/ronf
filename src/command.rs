@@ -214,6 +214,10 @@ pub fn parse_user_command(input: &str) -> Option<UserCommand> {
         return Some(UserCommand::Say(input.to_string()));
     }
 
+    if let Some(escaped) = trimmed.strip_prefix("//") {
+        return Some(UserCommand::Say(format!("/{escaped}")));
+    }
+
     let (cmd, rest) = match trimmed.split_once(char::is_whitespace) {
         Some((c, r)) => (c.to_ascii_lowercase(), r.trim()),
         None => (trimmed.to_ascii_lowercase(), ""),
@@ -520,6 +524,18 @@ mod tests {
         assert_eq!(
             parse_user_command("plain chat line"),
             Some(UserCommand::Say("plain chat line".to_string()))
+        );
+        assert_eq!(
+            parse_user_command("//shrug"),
+            Some(UserCommand::Say("/shrug".to_string()))
+        );
+        assert_eq!(
+            parse_user_command("//me waves"),
+            Some(UserCommand::Say("/me waves".to_string()))
+        );
+        assert_eq!(
+            parse_user_command("//"),
+            Some(UserCommand::Say("/".to_string()))
         );
     }
 }
